@@ -17,6 +17,8 @@ from linux.accessibility import (
 	AtspiFocusEventMonitor,
 	DesktopSnapshot,
 	describeObjectSnapshot,
+	describeAccessibleNameSources,
+	resolveAccessibleObjectSnapshot,
 	snapshotDesktop,
 )
 from linux.speech import EspeakSpeaker, buildFocusAnnouncement
@@ -293,10 +295,50 @@ class LinuxPlatform(SystemPlatform):
 					event.debugNameSources,
 				)
 			if event.detail1 and event.sourceObject is not None:
-				announcement = buildFocusAnnouncement(event.sourceObject)
+				resolvedObject = event.sourceObject
+				if event.sourceObject.name is None and event.sourceAccessible is not None:
+					resolvedObject = self._lateResolveFocusedObject(
+						event=event,
+						focusEventMonitor=focusEventMonitor,
+						log=log,
+					) or resolvedObject
+				announcement = buildFocusAnnouncement(resolvedObject)
 				if announcement and runtime.speaker is not None:
 					runtime.speaker.speak(announcement)
 		return True
+
+	def _lateResolveFocusedObject(
+		self,
+		*,
+		event,
+		focusEventMonitor: AtspiFocusEventMonitor,
+		log: Any,
+	):
+		sourceAccessible = event.sourceAccessible
+		if sourceAccessible is None:
+			return event.sourceObject
+		resolvedObject = resolveAccessibleObjectSnapshot(
+			sourceAccessible,
+			attempts=6,
+			delaySeconds=0.03,
+			shouldContinue=lambda: focusEventMonitor.latestFocusedAccessible is sourceAccessible,
+		)
+		if resolvedObject is None:
+			return event.sourceObject
+		if resolvedObject.name and resolvedObject.name != event.sourceObject.name:
+			log.info(
+				"Linux AT-SPI late-resolved focus: %s",
+				describeObjectSnapshot(resolvedObject),
+			)
+		elif resolvedObject.name is None and resolvedObject.childCount > 0:
+			try:
+				log.info(
+					"Linux AT-SPI late name sources: %s",
+					describeAccessibleNameSources(sourceAccessible),
+				)
+			except Exception:
+				log.debug("Failed to describe late AT-SPI name sources", exc_info=True)
+		return resolvedObject
 
 	def terminate_core_runtime(
 		self,

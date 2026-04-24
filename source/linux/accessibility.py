@@ -55,6 +55,7 @@ class FocusEventSnapshot:
 	sourceRole: str | None
 	hostApplicationName: str | None
 	sourceObject: AtspiObjectSnapshot | None = None
+	sourceAccessible: object | None = None
 	debugNameSources: str | None = None
 
 
@@ -76,6 +77,7 @@ class AtspiFocusEventMonitor:
 		self._pendingEvents: deque[FocusEventSnapshot] = deque(maxlen=32)
 		self.latestEvent: FocusEventSnapshot | None = None
 		self.latestFocusedObject: AtspiObjectSnapshot | None = None
+		self.latestFocusedAccessible: object | None = None
 
 	@property
 	def registeredEvents(self) -> tuple[str, ...]:
@@ -115,6 +117,7 @@ class AtspiFocusEventMonitor:
 		self._pendingEvents.append(focusEvent)
 		if focusEvent.detail1 and focusEvent.sourceObject is not None:
 			self.latestFocusedObject = focusEvent.sourceObject
+			self.latestFocusedAccessible = focusEvent.sourceAccessible
 
 
 def _getControlTypes():
@@ -306,6 +309,21 @@ def _getAccessibleStateSet(accessible):
 		return accessible.get_state_set()
 	except Exception:
 		return None
+
+
+def _clearAccessibleCache(accessible) -> bool:
+	if accessible is None:
+		return False
+	for methodName in ("clear_cache", "clear_cache_single"):
+		method = getattr(accessible, methodName, None)
+		if not callable(method):
+			continue
+		try:
+			method()
+		except Exception:
+			continue
+		return True
+	return False
 
 
 def _getAccessibleRoleEnum(accessible):
@@ -989,6 +1007,38 @@ def snapshotAccessibleObject(accessible) -> AtspiObjectSnapshot:
 	)
 
 
+def resolveAccessibleObjectSnapshot(
+	accessible,
+	*,
+	attempts: int = 5,
+	delaySeconds: float = 0.03,
+	shouldContinue=None,
+) -> AtspiObjectSnapshot | None:
+	if accessible is None:
+		return None
+	import time
+
+	try:
+		snapshot = snapshotAccessibleObject(accessible)
+	except Exception:
+		return None
+	if snapshot.name or snapshot.childCount <= 0 or attempts <= 1:
+		return snapshot
+	for _attempt in range(max(0, attempts - 1)):
+		if callable(shouldContinue) and not shouldContinue():
+			break
+		_clearAccessibleCache(accessible)
+		if delaySeconds > 0:
+			time.sleep(delaySeconds)
+		try:
+			snapshot = snapshotAccessibleObject(accessible)
+		except Exception:
+			continue
+		if snapshot.name:
+			break
+	return snapshot
+
+
 def describeObjectSnapshot(snapshot: AtspiObjectSnapshot) -> str:
 	stateNames = ",".join(snapshot.stateNames) or "-"
 	return (
@@ -1064,5 +1114,6 @@ def snapshotFocusEvent(event) -> FocusEventSnapshot:
 		sourceRole=_getAccessibleRole(source),
 		hostApplicationName=_getHostApplicationName(source),
 		sourceObject=sourceObject,
+		sourceAccessible=source,
 		debugNameSources=debugNameSources,
 	)
