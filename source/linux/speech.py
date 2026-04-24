@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from queue import Empty, Queue
+import re
 import shutil
 import subprocess
 import threading
@@ -223,6 +224,30 @@ def _getAccessibleAttributeValue(accessible, attributeName: str) -> str | None:
 	return None
 
 
+def _iterAccessibleAttributeCandidates(accessible) -> tuple[str, ...]:
+	preferredKeys = (
+		"accessible-name",
+		"label",
+		"displayed-label",
+		"displayed_text",
+		"displayed-text",
+		"title",
+		"tooltip-text",
+		"placeholder-text",
+	)
+	attributeMap = dict(_getAccessibleAttributes(accessible))
+	candidates: list[str] = []
+	for key in preferredKeys:
+		value = attributeMap.get(key)
+		if value and value not in candidates:
+			candidates.append(value)
+	for key, value in attributeMap.items():
+		keyLower = key.casefold()
+		if ("label" in keyLower or "name" in keyLower or "title" in keyLower) and value not in candidates:
+			candidates.append(value)
+	return tuple(candidates)
+
+
 def _iterRelationTargets(accessible, relationTypes: set[object], *, maxTargets: int = 8):
 	if accessible is None:
 		return
@@ -286,6 +311,16 @@ def _getDisplayedLabel(accessible) -> str | None:
 	return " ".join(labelParts)
 
 
+def _isLikelyContainerDescription(text: str | None) -> bool:
+	if not text:
+		return False
+	text = _normalizeComparisonText(text)
+	return bool(
+		re.search(r"\b(containing|contains)\s+\d+\s+items?\b", text)
+		or re.search(r"\b\d+\s+items?\b", text)
+	)
+
+
 def _isShortcutLike(text: str | None) -> bool:
 	if not text:
 		return False
@@ -322,7 +357,11 @@ def _getPresentableDescendantNames(accessible, *, maxParts: int = 3) -> tuple[st
 	for descendant in _iterAccessibleDescendants(accessible):
 		if _getAccessibleRoleEnum(descendant) in skipRoles:
 			continue
-		candidate = _getAccessibleSelfName(descendant) or _getAccessibleTextContent(descendant)
+		candidate = (
+			_getAccessibleSelfName(descendant)
+			or _getAccessibleTextContent(descendant)
+			or next(iter(_iterAccessibleAttributeCandidates(descendant)), None)
+		)
 		if not candidate or _isShortcutLike(candidate):
 			continue
 		if any(_stringsAreRedundant(existingCandidate, candidate) for existingCandidate in candidates):
@@ -338,10 +377,14 @@ def _getAccessibleLabelAndName(
 	*,
 	nameOverride: str | None = None,
 ) -> tuple[str, ...]:
+	roleEnum = _getAccessibleRoleEnum(accessible)
+	childCount = _getAccessibleChildCount(accessible)
 	label = _getDisplayedLabel(accessible)
 	name = _getAccessibleSelfName(accessible, nameOverride=nameOverride)
 	if not name:
-		name = _getAccessibleDescription(accessible)
+		name = _getAccessibleTextContent(accessible)
+	if not name:
+		name = next(iter(_iterAccessibleAttributeCandidates(accessible)), None)
 	if label and name and _stringsAreRedundant(label, name):
 		return (label,)
 	if label and name:
@@ -353,6 +396,20 @@ def _getAccessibleLabelAndName(
 	descendantNames = _getPresentableDescendantNames(accessible)
 	if descendantNames:
 		return descendantNames
+	description = _getAccessibleDescription(accessible)
+	menuRoles = {
+		importAtspi().Role.CHECK_MENU_ITEM,
+		importAtspi().Role.MENU,
+		importAtspi().Role.MENU_ITEM,
+		importAtspi().Role.POPUP_MENU,
+		importAtspi().Role.RADIO_MENU_ITEM,
+	}
+	if (
+		description
+		and not _isLikelyContainerDescription(description)
+		and not (childCount > 0 and roleEnum in menuRoles)
+	):
+		return (description,)
 	return ()
 
 
