@@ -8,7 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from linux.speech import buildAccessibleAnnouncement
+from linux import speech as speechHelpers
+from linux.accessibility import snapshotAccessibleObject
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,291 @@ class LinuxFocusManager:
 
 
 class LinuxSpeechGenerator:
+	def _appendParts(self, parts: list[str], newParts: list[str] | tuple[str, ...]) -> None:
+		speechHelpers._extendUtteranceParts(parts, list(newParts))
+
+	def _generate_accessible_label(
+		self,
+		obj: object | None,
+	) -> list[str]:
+		label = speechHelpers._getDisplayedLabel(obj)
+		return [label] if label else []
+
+	def _generate_accessible_name(
+		self,
+		obj: object | None,
+		*,
+		snapshot: object | None = None,
+		nameOverride: str | None = None,
+		allowDescendantTraversal: bool = False,
+	) -> list[str]:
+		label = speechHelpers._getDisplayedLabel(obj)
+		labelAndName = speechHelpers._getAccessibleLabelAndName(
+			obj,
+			snapshot=snapshot,
+			nameOverride=nameOverride,
+			allowDescendantTraversal=allowDescendantTraversal,
+		)
+		if not labelAndName:
+			return []
+		if not label:
+			return list(labelAndName)
+		return [
+			part
+			for part in labelAndName
+			if not speechHelpers._stringsAreRedundant(part, label)
+		]
+
+	def _generate_accessible_label_and_name(
+		self,
+		obj: object | None,
+		*,
+		snapshot: object | None = None,
+		nameOverride: str | None = None,
+		allowDescendantTraversal: bool = False,
+	) -> list[str]:
+		return list(
+			speechHelpers._getAccessibleLabelAndName(
+				obj,
+				snapshot=snapshot,
+				nameOverride=nameOverride,
+				allowDescendantTraversal=allowDescendantTraversal,
+			),
+		)
+
+	def _generate_accessible_static_text(
+		self,
+		obj: object | None,
+		*,
+		snapshot: object | None = None,
+		exclude: tuple[str, ...] = (),
+	) -> list[str]:
+		return list(
+			speechHelpers._getAccessibleStaticText(
+				obj,
+				snapshot=snapshot,
+				exclude=exclude,
+			),
+		)
+
+	def _generate_accessible_role(
+		self,
+		obj: object | None,
+		*,
+		snapshot,
+	) -> list[str]:
+		if not speechHelpers._shouldSpeakRole(obj, snapshot):
+			return []
+		return [snapshot.role.displayString]
+
+	def _generate_keyboard_mnemonic(self, obj: object | None) -> list[str]:
+		mnemonic, _accelerator = speechHelpers._getAccessibleKeyboardInfo(obj)
+		return [mnemonic] if mnemonic else []
+
+	def _generate_keyboard_accelerator(self, obj: object | None) -> list[str]:
+		_mnemonic, accelerator = speechHelpers._getAccessibleKeyboardInfo(obj)
+		return [accelerator] if accelerator else []
+
+	def _generate_state_checked_if_checkable(self, snapshot) -> list[str]:
+		return speechHelpers._getFilteredStateLabels(
+			snapshot,
+			allowedStateNames={"CHECKED", "HALFCHECKED", "PRESSED"},
+		)
+
+	def _generate_state_expanded(self, snapshot) -> list[str]:
+		return speechHelpers._getFilteredStateLabels(
+			snapshot,
+			allowedStateNames={"EXPANDED", "COLLAPSED"},
+		)
+
+	def _generate_state_sensitive(self, snapshot) -> list[str]:
+		return speechHelpers._getFilteredStateLabels(
+			snapshot,
+			allowedStateNames={"UNAVAILABLE"},
+		)
+
+	def _generate_position_in_list(self, obj: object | None) -> list[str]:
+		del obj
+		return []
+
+	def _generate_default_presentation(
+		self,
+		obj: object | None,
+		context: LinuxGeneratorContext,
+		*,
+		snapshot,
+		nameOverride: str | None = None,
+	) -> list[str]:
+		del context
+		parts: list[str] = []
+		self._appendParts(
+			parts,
+			self._generate_accessible_label_and_name(
+				obj,
+				snapshot=snapshot,
+				nameOverride=nameOverride,
+			),
+		)
+		if (
+			speechHelpers._shouldAlwaysSpeakRole(snapshot)
+			or speechHelpers._shouldSpeakRole(obj, snapshot)
+			or not parts
+		):
+			self._appendParts(
+				parts,
+				self._generate_accessible_role(obj, snapshot=snapshot),
+			)
+		self._appendParts(parts, speechHelpers._getStateLabels(snapshot))
+		self._appendParts(parts, self._generate_keyboard_mnemonic(obj))
+		self._appendParts(parts, self._generate_keyboard_accelerator(obj))
+		if not parts and snapshot.applicationName:
+			parts.append(snapshot.applicationName)
+		return parts
+
+	def _generate_label(
+		self,
+		obj: object | None,
+		context: LinuxGeneratorContext,
+		*,
+		snapshot,
+		nameOverride: str | None = None,
+	) -> list[str]:
+		del context
+		parts: list[str] = []
+		self._appendParts(parts, self._generate_accessible_label(obj))
+		textContent = speechHelpers._getAccessibleTextContent(obj)
+		if textContent:
+			self._appendParts(parts, [textContent])
+		else:
+			self._appendParts(
+				parts,
+				self._generate_accessible_name(
+					obj,
+					snapshot=snapshot,
+					nameOverride=nameOverride,
+				),
+			)
+		self._appendParts(parts, self._generate_accessible_role(obj, snapshot=snapshot))
+		return parts
+
+	def _generate_panel(
+		self,
+		obj: object | None,
+		context: LinuxGeneratorContext,
+		*,
+		snapshot,
+		nameOverride: str | None = None,
+	) -> list[str]:
+		del context
+		parts: list[str] = []
+		textContent = speechHelpers._getAccessibleTextContent(obj)
+		if textContent:
+			self._appendParts(parts, [textContent])
+		if not parts:
+			self._appendParts(
+				parts,
+				self._generate_accessible_label_and_name(
+					obj,
+					snapshot=snapshot,
+					nameOverride=nameOverride,
+				),
+			)
+		self._appendParts(
+			parts,
+			self._generate_accessible_static_text(
+				obj,
+				snapshot=snapshot,
+				exclude=tuple(parts),
+			),
+		)
+		self._appendParts(parts, self._generate_accessible_role(obj, snapshot=snapshot))
+		return parts
+
+	def _generate_menu_item(
+		self,
+		obj: object | None,
+		context: LinuxGeneratorContext,
+		*,
+		snapshot,
+		nameOverride: str | None = None,
+	) -> list[str]:
+		del context
+		parts: list[str] = []
+		self._appendParts(
+			parts,
+			self._generate_accessible_label_and_name(
+				obj,
+				snapshot=snapshot,
+				nameOverride=nameOverride,
+				allowDescendantTraversal=True,
+			),
+		)
+		if not parts:
+			self._appendParts(
+				parts,
+				self._generate_accessible_static_text(
+					obj,
+					snapshot=snapshot,
+					exclude=tuple(parts),
+				),
+			)
+		self._appendParts(parts, self._generate_accessible_role(obj, snapshot=snapshot))
+		self._appendParts(parts, self._generate_state_checked_if_checkable(snapshot))
+		self._appendParts(parts, self._generate_state_expanded(snapshot))
+		self._appendParts(parts, self._generate_state_sensitive(snapshot))
+		self._appendParts(parts, self._generate_keyboard_mnemonic(obj))
+		self._appendParts(parts, self._generate_keyboard_accelerator(obj))
+		self._appendParts(parts, self._generate_position_in_list(obj))
+		return parts
+
+	def _generate_for_role(
+		self,
+		obj: object | None,
+		context: LinuxGeneratorContext,
+		*,
+		snapshot,
+		nameOverride: str | None = None,
+	) -> list[str]:
+		Atspi = speechHelpers.importAtspi()
+		roleEnum = speechHelpers._getAccessibleRoleEnum(obj)
+		if roleEnum in {
+			Atspi.Role.CHECK_MENU_ITEM,
+			Atspi.Role.MENU_ITEM,
+			Atspi.Role.RADIO_MENU_ITEM,
+			Atspi.Role.TEAROFF_MENU_ITEM,
+		}:
+			return self._generate_menu_item(
+				obj,
+				context,
+				snapshot=snapshot,
+				nameOverride=nameOverride,
+			)
+		if roleEnum == Atspi.Role.LABEL:
+			return self._generate_label(
+				obj,
+				context,
+				snapshot=snapshot,
+				nameOverride=nameOverride,
+			)
+		if roleEnum in {
+			Atspi.Role.FILLER,
+			Atspi.Role.PANEL,
+			Atspi.Role.STATIC,
+			Atspi.Role.TEXT,
+		}:
+			return self._generate_panel(
+				obj,
+				context,
+				snapshot=snapshot,
+				nameOverride=nameOverride,
+			)
+		return self._generate_default_presentation(
+			obj,
+			context,
+			snapshot=snapshot,
+			nameOverride=nameOverride,
+		)
+
 	def generate_speech(
 		self,
 		obj: object | None,
@@ -73,12 +359,24 @@ class LinuxSpeechGenerator:
 		snapshot: object | None = None,
 		nameOverride: str | None = None,
 	) -> str:
-		del context
-		return buildAccessibleAnnouncement(
+		if obj is None and snapshot is None:
+			return ""
+		if snapshot is None and obj is not None:
+			try:
+				snapshot = snapshotAccessibleObject(obj)
+			except Exception:
+				snapshot = None
+		if snapshot is None:
+			return ""
+		parts = self._generate_for_role(
 			obj,
+			context,
 			snapshot=snapshot,
 			nameOverride=nameOverride,
 		)
+		if not parts and snapshot.applicationName:
+			parts = [snapshot.applicationName]
+		return speechHelpers._sanitizeUtterance(" ".join(part for part in parts if part))
 
 
 class LinuxPresentationManager:
