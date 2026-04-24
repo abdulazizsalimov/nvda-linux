@@ -29,7 +29,7 @@ from linux.gtkMenus import (
 	getExportedGtkMenuSnapshot,
 	matchExportedGtkMenuItem,
 )
-from linux.speech import EspeakSpeaker, buildFocusAnnouncement
+from linux.speech import EspeakSpeaker, buildAccessibleAnnouncement
 from linux.atspi import probeAtspiSupport
 from .base import SystemPlatform
 
@@ -53,7 +53,7 @@ class LinuxCoreRuntime:
 	pollIntervalSeconds: float = 0.05
 	interrupted: bool = False
 	speaker: EspeakSpeaker | None = None
-	lastAnnouncementKey: tuple[str | None, str | None, str | None] | None = None
+	lastAnnouncementKey: tuple[str, str | None] | None = None
 	lastAnnouncementTime: float = 0.0
 
 
@@ -330,11 +330,15 @@ class LinuxPlatform(SystemPlatform):
 						resolvedObject.applicationName,
 					)
 					resolvedObject = replaceObjectSnapshotName(resolvedObject, event.nameOverride)
-				announcement = buildFocusAnnouncement(resolvedObject)
+				announcement = buildAccessibleAnnouncement(
+					event.sourceAccessible,
+					snapshot=resolvedObject,
+					nameOverride=event.nameOverride,
+				)
 				if (
 					announcement
 					and runtime.speaker is not None
-					and self._shouldSpeakAnnouncement(runtime, resolvedObject)
+					and self._shouldSpeakAnnouncement(runtime, announcement, resolvedObject)
 				):
 					runtime.speaker.speak(announcement)
 		return True
@@ -356,13 +360,13 @@ class LinuxPlatform(SystemPlatform):
 	def _shouldSpeakAnnouncement(
 		self,
 		runtime: LinuxCoreRuntime,
+		announcement: str,
 		resolvedObject,
 		*,
 		dedupWindowSeconds: float = 0.2,
 	) -> bool:
 		announcementKey = (
-			resolvedObject.name,
-			resolvedObject.roleName,
+			announcement,
 			resolvedObject.applicationName,
 		)
 		now = time.monotonic()
@@ -411,14 +415,10 @@ class LinuxPlatform(SystemPlatform):
 		)
 		if gtkMenuResolvedObject is not None:
 			return gtkMenuResolvedObject
-		if (
-			resolvedObject.name is None
-			and resolvedObject.applicationName == "org.gnome.Nautilus"
-			and resolvedObject.childCount > 0
-		):
+		if resolvedObject.name is None and resolvedObject.childCount > 0:
 			log.info(
-				"Linux Nautilus menu item still nameless after raw AT-SPI resolution; "
-				"resource fallback disabled for diagnostics",
+				"Linux AT-SPI object still nameless after raw resolution; "
+				"continuing with live accessible presentation",
 			)
 		if resolvedObject.name is None and resolvedObject.childCount > 0:
 			try:
