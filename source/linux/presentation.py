@@ -804,7 +804,6 @@ class LinuxGtkScript(LinuxDefaultScript):
 		*,
 		resolveSnapshot: Callable[[Any], object | None],
 	) -> LinuxPresentationResult | None:
-		del resolveSnapshot
 		if (
 			LinuxAXUtilities.is_table_cell(event.eventSourceAccessible)
 			and LinuxAXUtilities.find_ancestor(event.eventSourceAccessible, LinuxAXUtilities.is_window)
