@@ -55,6 +55,7 @@ class FocusEventSnapshot:
 	sourceRole: str | None
 	hostApplicationName: str | None
 	sourceObject: AtspiObjectSnapshot | None = None
+	debugNameSources: str | None = None
 
 
 @dataclass(frozen=True)
@@ -329,13 +330,28 @@ def _normalizeAccessibleName(name: str | None) -> str | None:
 	return name or None
 
 
-def _getAccessibleSelfName(accessible) -> str | None:
+def _callAccessibleStringMethod(accessible, methodName: str) -> str | None:
 	if accessible is None:
 		return None
+	method = getattr(accessible, methodName, None)
+	if not callable(method):
+		return None
 	try:
-		return _normalizeAccessibleName(accessible.get_name())
+		return _normalizeAccessibleName(method())
 	except Exception:
 		return None
+
+
+def _getAccessibleSelfName(accessible) -> str | None:
+	return _callAccessibleStringMethod(accessible, "get_name")
+
+
+def _getAccessibleDescription(accessible) -> str | None:
+	return _callAccessibleStringMethod(accessible, "get_description")
+
+
+def _getAccessibleHelpText(accessible) -> str | None:
+	return _callAccessibleStringMethod(accessible, "get_help_text")
 
 
 def _getAccessibleChild(accessible, index: int):
@@ -372,6 +388,213 @@ def _iterAccessibleDescendants(
 			if visited >= maxNodes:
 				return
 			pending.append((child, depth + 1))
+
+
+def _isUsableAccessibleNameCandidate(
+	name: str | None,
+	*,
+	applicationName: str | None,
+) -> bool:
+	if not name:
+		return False
+	if applicationName and name.casefold() == applicationName.casefold():
+		return False
+	return True
+
+
+def _getAccessibleTextContent(accessible) -> str | None:
+	if accessible is None:
+		return None
+	textIface = None
+	getTextIface = getattr(accessible, "get_text_iface", None)
+	if callable(getTextIface):
+		try:
+			textIface = getTextIface()
+		except Exception:
+			textIface = None
+	if textIface is None:
+		isText = getattr(accessible, "is_text", None)
+		try:
+			if callable(isText) and isText():
+				textIface = accessible
+		except Exception:
+			textIface = None
+	if textIface is None:
+		return None
+	getCharacterCount = getattr(textIface, "get_character_count", None)
+	getText = getattr(textIface, "get_text", None)
+	if not callable(getCharacterCount) or not callable(getText):
+		return None
+	try:
+		characterCount = int(getCharacterCount() or 0)
+	except Exception:
+		characterCount = 0
+	if characterCount <= 0:
+		return None
+	try:
+		return _normalizeAccessibleName(getText(0, characterCount))
+	except Exception:
+		try:
+			return _normalizeAccessibleName(getText(0, -1))
+		except Exception:
+			return None
+
+
+def _iterRelationTargets(accessible, relationTypes: set[object], *, maxTargets: int = 8):
+	if accessible is None:
+		return
+	getRelationSet = getattr(accessible, "get_relation_set", None)
+	if not callable(getRelationSet):
+		return
+	try:
+		relationSet = getRelationSet()
+	except Exception:
+		return
+	if relationSet is None:
+		return
+	try:
+		relations = list(relationSet)
+	except TypeError:
+		relations = []
+		getRelation = getattr(relationSet, "get_relation", None)
+		getRelationCount = getattr(relationSet, "get_n_relations", None)
+		if callable(getRelation) and callable(getRelationCount):
+			try:
+				relationCount = int(getRelationCount() or 0)
+			except Exception:
+				relationCount = 0
+			for relationIndex in range(max(0, relationCount)):
+				try:
+					relation = getRelation(relationIndex)
+				except Exception:
+					continue
+				if relation is not None:
+					relations.append(relation)
+	targetCount = 0
+	for relation in relations:
+		getRelationType = getattr(relation, "get_relation_type", None)
+		if not callable(getRelationType):
+			continue
+		try:
+			relationType = getRelationType()
+		except Exception:
+			continue
+		if relationType not in relationTypes:
+			continue
+		getTarget = getattr(relation, "get_target", None)
+		if callable(getTarget):
+			try:
+				targets = getTarget()
+			except TypeError:
+				targets = None
+			except Exception:
+				targets = None
+			else:
+				if targets is not None:
+					try:
+						for target in targets:
+							if target is None:
+								continue
+							yield target
+							targetCount += 1
+							if targetCount >= maxTargets:
+								return
+						continue
+					except TypeError:
+						pass
+		getTargetCount = getattr(relation, "get_n_targets", None)
+		if not callable(getTarget) or not callable(getTargetCount):
+			continue
+		try:
+			relationTargetCount = int(getTargetCount() or 0)
+		except Exception:
+			relationTargetCount = 0
+		for targetIndex in range(max(0, relationTargetCount)):
+			try:
+				target = getTarget(targetIndex)
+			except Exception:
+				continue
+			if target is None:
+				continue
+			yield target
+			targetCount += 1
+			if targetCount >= maxTargets:
+				return
+
+
+def _iterFallbackNameCandidates(
+	accessible,
+	*,
+	applicationName: str | None,
+	includeRelations: bool = True,
+) -> tuple[str, ...]:
+	Atspi = importAtspi()
+	candidates: list[str] = []
+	seen: set[str] = set()
+
+	def _addCandidate(candidate: str | None) -> None:
+		if not _isUsableAccessibleNameCandidate(candidate, applicationName=applicationName):
+			return
+		candidate = candidate.strip()
+		candidateKey = candidate.casefold()
+		if candidateKey in seen:
+			return
+		seen.add(candidateKey)
+		candidates.append(candidate)
+
+	_addCandidate(_getAccessibleSelfName(accessible))
+	_addCandidate(_getAccessibleDescription(accessible))
+	_addCandidate(_getAccessibleHelpText(accessible))
+	_addCandidate(_getAccessibleTextContent(accessible))
+	if includeRelations:
+		relationTypes = {
+			getattr(Atspi.RelationType, "LABELLED_BY", None),
+			getattr(Atspi.RelationType, "DESCRIBED_BY", None),
+			getattr(Atspi.RelationType, "DETAILS", None),
+			getattr(Atspi.RelationType, "ERROR_MESSAGE", None),
+		}
+		relationTypes.discard(None)
+		for relatedAccessible in _iterRelationTargets(
+			accessible,
+			relationTypes=relationTypes,
+		):
+			for candidate in _iterFallbackNameCandidates(
+				relatedAccessible,
+				applicationName=applicationName,
+				includeRelations=False,
+			):
+				_addCandidate(candidate)
+	return tuple(candidates)
+
+
+def describeAccessibleNameSources(
+	accessible,
+	*,
+	maxChildren: int = 4,
+) -> str:
+	applicationName = _getHostApplicationName(accessible)
+	roleName = _getAccessibleRole(accessible)
+	candidates = _iterFallbackNameCandidates(
+		accessible,
+		applicationName=applicationName,
+	)
+	childDescriptions: list[str] = []
+	for childIndex in range(min(_getAccessibleChildCount(accessible), maxChildren)):
+		child = _getAccessibleChild(accessible, childIndex)
+		if child is None:
+			continue
+		childCandidates = _iterFallbackNameCandidates(
+			child,
+			applicationName=applicationName,
+			includeRelations=False,
+		)
+		childDescriptions.append(
+			f"{childIndex}:{_getAccessibleRole(child)}:{childCandidates!r}"
+		)
+	return (
+		f"role={roleName} app={applicationName!r} "
+		f"candidates={candidates!r} children=[{', '.join(childDescriptions)}]"
+	)
 
 
 def _shouldUseDescendantNameFallback(
@@ -418,11 +641,14 @@ def _getDescendantAccessibleName(
 	fallbackName: str | None = None
 	secondaryFallbackName: str | None = None
 	for descendant in _iterAccessibleDescendants(accessible):
-		descendantName = _getAccessibleSelfName(descendant)
-		if not descendantName:
+		descendantCandidates = _iterFallbackNameCandidates(
+			descendant,
+			applicationName=applicationName,
+			includeRelations=False,
+		)
+		if not descendantCandidates:
 			continue
-		if applicationName and descendantName.casefold() == applicationName.casefold():
-			continue
+		descendantName = descendantCandidates[0]
 		descendantRole = _getAccessibleRoleEnum(descendant)
 		if descendantRole in primaryRoles:
 			return descendantName
@@ -437,9 +663,13 @@ def _getDescendantAccessibleName(
 def _getAccessibleName(accessible) -> str | None:
 	if accessible is None:
 		return None
-	name = _getAccessibleSelfName(accessible)
-	roleEnum = _getAccessibleRoleEnum(accessible)
 	applicationName = _getHostApplicationName(accessible)
+	fallbackCandidates = _iterFallbackNameCandidates(
+		accessible,
+		applicationName=applicationName,
+	)
+	name = fallbackCandidates[0] if fallbackCandidates else None
+	roleEnum = _getAccessibleRoleEnum(accessible)
 	if not _shouldUseDescendantNameFallback(
 		name,
 		roleEnum=roleEnum,
@@ -618,6 +848,16 @@ def snapshotFocusEvent(event) -> FocusEventSnapshot:
 		sourceObject = snapshotAccessibleObject(source) if source is not None else None
 	except Exception:
 		sourceObject = None
+	try:
+		debugNameSources = (
+			describeAccessibleNameSources(source)
+			if sourceObject is not None
+			and sourceObject.name is None
+			and sourceObject.childCount > 0
+			else None
+		)
+	except Exception:
+		debugNameSources = None
 	return FocusEventSnapshot(
 		eventType=getattr(event, "type", ""),
 		detail1=int(getattr(event, "detail1", 0) or 0),
@@ -626,4 +866,5 @@ def snapshotFocusEvent(event) -> FocusEventSnapshot:
 		sourceRole=_getAccessibleRole(source),
 		hostApplicationName=_getHostApplicationName(source),
 		sourceObject=sourceObject,
+		debugNameSources=debugNameSources,
 	)

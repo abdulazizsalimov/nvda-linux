@@ -286,6 +286,12 @@ class LinuxPlatform(SystemPlatform):
 					event.sourceName,
 					event.hostApplicationName,
 				)
+			if event.debugNameSources:
+				log.info(
+					"Linux AT-SPI %s name sources: %s",
+					eventState,
+					event.debugNameSources,
+				)
 			if event.detail1 and event.sourceObject is not None:
 				announcement = buildFocusAnnouncement(event.sourceObject)
 				if announcement and runtime.speaker is not None:
