@@ -53,6 +53,8 @@ class LinuxCoreRuntime:
 	pollIntervalSeconds: float = 0.05
 	interrupted: bool = False
 	speaker: EspeakSpeaker | None = None
+	lastAnnouncementKey: tuple[str | None, str | None, str | None] | None = None
+	lastAnnouncementTime: float = 0.0
 
 
 class LinuxPlatform(SystemPlatform):
@@ -114,10 +116,10 @@ class LinuxPlatform(SystemPlatform):
 			runtime.focusEventMonitor = AtspiFocusEventMonitor()
 			registeredEvents = runtime.focusEventMonitor.register()
 		except Exception:
-			log.debug("Failed to register Linux AT-SPI focus event monitor", exc_info=True)
+			log.debug("Failed to register Linux AT-SPI presentation event monitor", exc_info=True)
 			runtime.focusEventMonitor = None
 		else:
-			log.info("Linux AT-SPI focus event monitor registered: %s", registeredEvents)
+			log.info("Linux AT-SPI presentation event monitor registered: %s", registeredEvents)
 		return runtime
 
 	def terminate_platform_bootstrap_runtime(
@@ -182,10 +184,13 @@ class LinuxPlatform(SystemPlatform):
 				focusEventMonitor = AtspiFocusEventMonitor()
 				registeredEvents = focusEventMonitor.register()
 			except Exception:
-				log.debug("Failed to create Linux AT-SPI focus event monitor for core runtime", exc_info=True)
+				log.debug(
+					"Failed to create Linux AT-SPI presentation event monitor for core runtime",
+					exc_info=True,
+				)
 				focusEventMonitor = None
 			else:
-				log.info("Linux AT-SPI core focus event monitor registered: %s", registeredEvents)
+				log.info("Linux AT-SPI core presentation event monitor registered: %s", registeredEvents)
 		try:
 			from gi.repository import GLib
 		except Exception:
@@ -281,17 +286,16 @@ class LinuxPlatform(SystemPlatform):
 		if not pendingEvents:
 			return False
 		for event in pendingEvents:
-			eventState = "focus-gained" if event.detail1 else "focus-lost"
 			if event.sourceObject is not None:
 				log.info(
 					"Linux AT-SPI %s: %s",
-					eventState,
+					event.eventLabel,
 					describeObjectSnapshot(event.sourceObject),
 				)
 			else:
 				log.info(
 					"Linux AT-SPI %s: role=%s name=%r app=%r",
-					eventState,
+					event.eventLabel,
 					event.sourceRole,
 					event.sourceName,
 					event.hostApplicationName,
@@ -299,10 +303,10 @@ class LinuxPlatform(SystemPlatform):
 			if event.debugNameSources:
 				log.info(
 					"Linux AT-SPI %s name sources: %s",
-					eventState,
+					event.eventLabel,
 					event.debugNameSources,
 				)
-			if event.detail1 and event.sourceObject is not None:
+			if event.shouldAnnounce and event.sourceObject is not None:
 				resolvedObject = event.sourceObject
 				if event.sourceObject.name is None and event.sourceAccessible is not None:
 					resolvedObject = self._lateResolveFocusedObject(
@@ -312,8 +316,34 @@ class LinuxPlatform(SystemPlatform):
 						log=log,
 					) or resolvedObject
 				announcement = buildFocusAnnouncement(resolvedObject)
-				if announcement and runtime.speaker is not None:
+				if (
+					announcement
+					and runtime.speaker is not None
+					and self._shouldSpeakAnnouncement(runtime, resolvedObject)
+				):
 					runtime.speaker.speak(announcement)
+		return True
+
+	def _shouldSpeakAnnouncement(
+		self,
+		runtime: LinuxCoreRuntime,
+		resolvedObject,
+		*,
+		dedupWindowSeconds: float = 0.2,
+	) -> bool:
+		announcementKey = (
+			resolvedObject.name,
+			resolvedObject.roleName,
+			resolvedObject.applicationName,
+		)
+		now = time.monotonic()
+		if (
+			announcementKey == runtime.lastAnnouncementKey
+			and now - runtime.lastAnnouncementTime <= dedupWindowSeconds
+		):
+			return False
+		runtime.lastAnnouncementKey = announcementKey
+		runtime.lastAnnouncementTime = now
 		return True
 
 	def _lateResolveFocusedObject(

@@ -49,6 +49,8 @@ class AtspiObjectSnapshot:
 @dataclass(frozen=True)
 class FocusEventSnapshot:
 	eventType: str
+	eventLabel: str
+	shouldAnnounce: bool
 	detail1: int
 	detail2: int
 	sourceName: str | None
@@ -89,7 +91,12 @@ class AtspiFocusEventMonitor:
 
 	def register(self, *eventTypes: str) -> tuple[str, ...]:
 		if not eventTypes:
-			eventTypes = ("object:state-changed:focused",)
+			eventTypes = (
+				"object:state-changed:focused",
+				"object:active-descendant-changed",
+				"object:selection-changed",
+				"object:state-changed:selected",
+			)
 		registeredEvents: list[str] = []
 		for eventType in eventTypes:
 			if self._listener.register(eventType):
@@ -115,7 +122,7 @@ class AtspiFocusEventMonitor:
 		focusEvent = snapshotFocusEvent(event)
 		self.latestEvent = focusEvent
 		self._pendingEvents.append(focusEvent)
-		if focusEvent.detail1 and focusEvent.sourceObject is not None:
+		if focusEvent.shouldAnnounce and focusEvent.sourceObject is not None:
 			self.latestFocusedObject = focusEvent.sourceObject
 			self.latestFocusedAccessible = focusEvent.sourceAccessible
 
@@ -626,6 +633,85 @@ def _getAccessibleTextContent(accessible) -> str | None:
 			return None
 
 
+def _isAccessibleLike(value) -> bool:
+	if value is None:
+		return False
+	return any(
+		callable(getattr(value, methodName, None))
+		for methodName in (
+			"get_name",
+			"get_role",
+			"get_application",
+			"get_role_name",
+		)
+	)
+
+
+def _getAccessibleSelectionIface(accessible):
+	if accessible is None:
+		return None
+	getSelectionIface = getattr(accessible, "get_selection_iface", None)
+	if callable(getSelectionIface):
+		try:
+			selectionIface = getSelectionIface()
+		except Exception:
+			selectionIface = None
+		else:
+			if selectionIface is not None:
+				return selectionIface
+	isSelection = getattr(accessible, "is_selection", None)
+	try:
+		if callable(isSelection) and isSelection():
+			return accessible
+	except Exception:
+		pass
+	return None
+
+
+def _getSelectedAccessibleChild(accessible):
+	selectionIface = _getAccessibleSelectionIface(accessible)
+	if selectionIface is not None:
+		getSelectedChildCount = getattr(selectionIface, "get_n_selected_children", None)
+		getSelectedChild = getattr(selectionIface, "get_selected_child", None)
+		if callable(getSelectedChildCount) and callable(getSelectedChild):
+			try:
+				selectedChildCount = min(int(getSelectedChildCount() or 0), 8)
+			except Exception:
+				selectedChildCount = 0
+			for childIndex in range(max(0, selectedChildCount)):
+				try:
+					child = getSelectedChild(childIndex)
+				except Exception:
+					continue
+				if child is not None and child is not accessible:
+					return child
+	Atspi = importAtspi()
+	childCount = min(_getAccessibleChildCount(accessible), 16)
+	for childIndex in range(max(0, childCount)):
+		child = _getAccessibleChild(accessible, childIndex)
+		if child is None:
+			continue
+		stateSet = _getAccessibleStateSet(child)
+		if not stateSet:
+			continue
+		try:
+			if (
+				stateSet.contains(Atspi.StateType.SELECTED)
+				or stateSet.contains(Atspi.StateType.FOCUSED)
+			):
+				return child
+		except Exception:
+			continue
+	return None
+
+
+def _getActiveDescendantAccessible(event):
+	anyData = getattr(event, "any_data", None)
+	if _isAccessibleLike(anyData):
+		return anyData
+	return None
+
+
 def _iterRelationTargets(accessible, relationTypes: set[object], *, maxTargets: int = 8):
 	if accessible is None:
 		return
@@ -1121,7 +1207,27 @@ def snapshotDesktop(*, maxApplications: int = 10) -> DesktopSnapshot:
 
 
 def snapshotFocusEvent(event) -> FocusEventSnapshot:
+	eventType = getattr(event, "type", "") or ""
 	source = getattr(event, "source", None)
+	eventLabel = eventType or "event"
+	shouldAnnounce = False
+	target = source
+	if eventType.startswith("object:state-changed:focused"):
+		eventLabel = "focus-gained" if int(getattr(event, "detail1", 0) or 0) else "focus-lost"
+		shouldAnnounce = bool(int(getattr(event, "detail1", 0) or 0))
+	elif eventType.startswith("object:active-descendant-changed"):
+		eventLabel = "active-descendant-changed"
+		target = _getActiveDescendantAccessible(event) or source
+		shouldAnnounce = target is not None
+	elif eventType.startswith("object:selection-changed"):
+		eventLabel = "selection-changed"
+		target = _getSelectedAccessibleChild(source) or source
+		shouldAnnounce = target is not None and target is not source
+	elif eventType.startswith("object:state-changed:selected"):
+		eventLabel = "selected" if int(getattr(event, "detail1", 0) or 0) else "deselected"
+		target = source
+		shouldAnnounce = bool(int(getattr(event, "detail1", 0) or 0))
+	source = target
 	try:
 		sourceObject = snapshotAccessibleObject(source) if source is not None else None
 	except Exception:
@@ -1137,7 +1243,9 @@ def snapshotFocusEvent(event) -> FocusEventSnapshot:
 	except Exception:
 		debugNameSources = None
 	return FocusEventSnapshot(
-		eventType=getattr(event, "type", ""),
+		eventType=eventType,
+		eventLabel=eventLabel,
+		shouldAnnounce=shouldAnnounce,
 		detail1=int(getattr(event, "detail1", 0) or 0),
 		detail2=int(getattr(event, "detail2", 0) or 0),
 		sourceName=_getAccessibleName(source),
