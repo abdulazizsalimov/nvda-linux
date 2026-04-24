@@ -28,7 +28,6 @@ from linux.gtkMenus import (
 	getExportedGtkMenuSnapshot,
 	matchExportedGtkMenuItem,
 )
-from linux.nautilusMenus import resolveNautilusMenuShortcutLabel
 from linux.speech import EspeakSpeaker, buildFocusAnnouncement
 from linux.atspi import probeAtspiSupport
 from .base import SystemPlatform
@@ -382,14 +381,16 @@ class LinuxPlatform(SystemPlatform):
 		)
 		if gtkMenuResolvedObject is not None:
 			return gtkMenuResolvedObject
-		nautilusResolvedObject = self._resolveFromNautilusShortcuts(
-			event=event,
-			resolvedObject=resolvedObject,
-			log=log,
-		)
-		if nautilusResolvedObject is not None:
-			return nautilusResolvedObject
-		elif resolvedObject.name is None and resolvedObject.childCount > 0:
+		if (
+			resolvedObject.name is None
+			and resolvedObject.applicationName == "org.gnome.Nautilus"
+			and resolvedObject.childCount > 0
+		):
+			log.info(
+				"Linux Nautilus menu item still nameless after raw AT-SPI resolution; "
+				"resource fallback disabled for diagnostics",
+			)
+		if resolvedObject.name is None and resolvedObject.childCount > 0:
 			try:
 				log.info(
 					"Linux AT-SPI late name sources: %s",
@@ -442,30 +443,6 @@ class LinuxPlatform(SystemPlatform):
 			menuMatch.path,
 		)
 		return replaceObjectSnapshotName(resolvedObject, menuMatch.label)
-
-	def _resolveFromNautilusShortcuts(
-		self,
-		*,
-		event,
-		resolvedObject,
-		log: Any,
-	):
-		if resolvedObject.name or resolvedObject.applicationName != "org.gnome.Nautilus":
-			return None
-		keyshortcuts = getAccessibleAttributeValue(event.sourceAccessible, "keyshortcuts")
-		hasPopup = "HASPOPUP" in resolvedObject.stateNames
-		label = resolveNautilusMenuShortcutLabel(
-			keyshortcuts=keyshortcuts,
-			hasPopup=hasPopup,
-		)
-		if not label:
-			return None
-		log.info(
-			"Linux Nautilus resource-resolved focus: shortcut=%r label=%r",
-			keyshortcuts,
-			label,
-		)
-		return replaceObjectSnapshotName(resolvedObject, label)
 
 	def _pumpLateResolutionMainContext(self, glibMainContext: Any | None, log: Any) -> None:
 		if glibMainContext is None:
