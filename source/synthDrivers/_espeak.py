@@ -18,6 +18,7 @@ if os.name == "nt":
 	import nvwave
 else:
 	nvwave = None
+	from linux.audio import createWavePlayer
 
 isSpeaking = False
 onIndexReached = None
@@ -192,11 +193,6 @@ def callback(wav, numsamples, event):
 				onIndexReached(None)
 			isSpeaking = False
 			return CALLBACK_CONTINUE_SYNTHESIS
-		if player is None:
-			for indexNum, _indexByte in indexes:
-				if onIndexReached is not None:
-					onIndexReached(indexNum)
-			return CALLBACK_CONTINUE_SYNTHESIS
 		prevByte = 0
 		length = numsamples * sizeof(c_short)
 		for indexNum, indexByte in indexes:
@@ -261,21 +257,6 @@ def _speak(text):
 	# eSpeak can only process compound emojis  when using a UTF8 encoding
 	text = text.encode("utf8", errors="ignore")
 	flags = espeakCHARS_UTF8 | espeakSSML | espeakPHONEMES
-	if _IS_LINUX:
-		try:
-			res = espeakDLL.espeak_Synth(text, 0, 0, 0, 0, flags, byref(uniqueID), 0)  # noqa: F405
-			if res != EE_OK:
-				log.debugWarning("Linux eSpeak NG synthesis failed with code %s", res)
-				return res
-			res = espeakDLL.espeak_Synchronize()
-			if res != EE_OK:
-				log.debugWarning("Linux eSpeak NG synchronization failed with code %s", res)
-			return res
-		finally:
-			shouldNotifyDone = isSpeaking
-			isSpeaking = False
-			if shouldNotifyDone and onIndexReached is not None:
-				onIndexReached(None)
 	return espeakDLL.espeak_Synth(text, 0, 0, 0, 0, flags, byref(uniqueID), 0)  # noqa: F405
 
 
@@ -412,20 +393,19 @@ def initialize(indexCallback=None):
 	else:
 		espeakDLL = cdll.LoadLibrary(os.path.join(globalVars.appDir, "synthDrivers", "espeak.dll"))
 	espeakDLL.espeak_Info.restype = c_char_p  # noqa: F405
-	if not _IS_LINUX:
-		espeakDLL.espeak_Synth.errcheck = espeak_errcheck
+	espeakDLL.espeak_Synth.errcheck = espeak_errcheck
 	espeakDLL.espeak_SetVoiceByName.errcheck = espeak_errcheck
 	espeakDLL.espeak_SetVoiceByProperties.errcheck = espeak_errcheck
 	espeakDLL.espeak_SetParameter.errcheck = espeak_errcheck
 	espeakDLL.espeak_Terminate.errcheck = espeak_errcheck
-	if not _IS_LINUX and hasattr(espeakDLL, "espeak_Synchronize"):
+	if hasattr(espeakDLL, "espeak_Synchronize"):
 		espeakDLL.espeak_Synchronize.errcheck = espeak_errcheck
 	espeakDLL.espeak_ListVoices.restype = POINTER(POINTER(espeak_VOICE))
 	espeakDLL.espeak_GetCurrentVoice.restype = POINTER(espeak_VOICE)
 	espeakDLL.espeak_SetVoiceByName.argtypes = (c_char_p,)  # noqa: F405
 	if _IS_LINUX:
 		eSpeakPath = next((path for path in _SYSTEM_ESPEAK_DATA_PATHS if os.path.isdir(path)), None)
-		outputMode = AUDIO_OUTPUT_PLAYBACK
+		outputMode = AUDIO_OUTPUT_SYNCHRONOUS
 	else:
 		eSpeakPath = os.path.join(globalVars.appDir, "synthDrivers")
 		outputMode = AUDIO_OUTPUT_SYNCHRONOUS
@@ -441,7 +421,11 @@ def initialize(indexCallback=None):
 			f"espeak_Initialize failed with code {sampleRate}. Given Espeak data path of {eSpeakPath}",
 		)
 	if _IS_LINUX:
-		player = None
+		player = createWavePlayer(
+			channels=1,
+			samplesPerSec=sampleRate,
+			bitsPerSample=16,
+		)
 	else:
 		player = nvwave.WavePlayer(
 			channels=1,
@@ -450,8 +434,7 @@ def initialize(indexCallback=None):
 			outputDevice=config.conf["audio"]["outputDevice"],
 		)
 	onIndexReached = indexCallback
-	if not _IS_LINUX:
-		espeakDLL.espeak_SetSynthCallback(callback)
+	espeakDLL.espeak_SetSynthCallback(callback)
 	bgQueue = queue.Queue()
 	bgThread = BgThread()
 	bgThread.start()
