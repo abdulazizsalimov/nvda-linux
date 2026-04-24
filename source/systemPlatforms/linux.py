@@ -431,7 +431,7 @@ class LinuxPlatform(SystemPlatform):
 		if not label:
 			return None
 		log.info(
-			"Linux Nautilus shortcut-resolved focus: shortcut=%r label=%r",
+			"Linux Nautilus resource-resolved focus: shortcut=%r label=%r",
 			keyshortcuts,
 			label,
 		)
