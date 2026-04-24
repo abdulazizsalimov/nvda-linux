@@ -354,6 +354,10 @@ def _getAccessibleHelpText(accessible) -> str | None:
 	return _callAccessibleStringMethod(accessible, "get_help_text")
 
 
+def _getAccessibleId(accessible) -> str | None:
+	return _callAccessibleStringMethod(accessible, "get_accessible_id")
+
+
 def _getAccessibleChild(accessible, index: int):
 	if accessible is None:
 		return None
@@ -400,6 +404,151 @@ def _isUsableAccessibleNameCandidate(
 	if applicationName and name.casefold() == applicationName.casefold():
 		return False
 	return True
+
+
+def _getAccessibleAttributes(accessible) -> tuple[tuple[str, str], ...]:
+	if accessible is None:
+		return ()
+	getAttributesAsArray = getattr(accessible, "get_attributes_as_array", None)
+	if callable(getAttributesAsArray):
+		try:
+			rawAttributes = getAttributesAsArray()
+		except Exception:
+			rawAttributes = None
+		else:
+			if rawAttributes:
+				parsedAttributes: list[tuple[str, str]] = []
+				for rawAttribute in rawAttributes:
+					rawAttribute = str(rawAttribute)
+					if ":" in rawAttribute:
+						key, value = rawAttribute.split(":", 1)
+					elif "=" in rawAttribute:
+						key, value = rawAttribute.split("=", 1)
+					else:
+						continue
+					key = key.strip()
+					value = _normalizeAccessibleName(value)
+					if key and value:
+						parsedAttributes.append((key, value))
+				if parsedAttributes:
+					return tuple(parsedAttributes)
+	getAttributes = getattr(accessible, "get_attributes", None)
+	if not callable(getAttributes):
+		return ()
+	try:
+		attributes = getAttributes()
+	except Exception:
+		return ()
+	if not attributes:
+		return ()
+	if hasattr(attributes, "items"):
+		items = attributes.items()
+	else:
+		try:
+			items = list(attributes)
+		except Exception:
+			return ()
+	parsedAttributes = []
+	for item in items:
+		if not isinstance(item, tuple) or len(item) != 2:
+			continue
+		key, value = item
+		key = str(key).strip()
+		value = _normalizeAccessibleName(value)
+		if key and value:
+			parsedAttributes.append((key, value))
+	return tuple(parsedAttributes)
+
+
+def _iterAccessibleAttributeCandidates(
+	accessible,
+	*,
+	applicationName: str | None,
+) -> tuple[str, ...]:
+	preferredKeys = (
+		"accessible-name",
+		"label",
+		"displayed-label",
+		"displayed_text",
+		"displayed-text",
+		"title",
+		"tooltip-text",
+		"placeholder-text",
+		"description",
+	)
+	attributeMap = dict(_getAccessibleAttributes(accessible))
+	candidates: list[str] = []
+	seen: set[str] = set()
+
+	def _addCandidate(candidate: str | None) -> None:
+		if not _isUsableAccessibleNameCandidate(candidate, applicationName=applicationName):
+			return
+		candidate = candidate.strip()
+		candidateKey = candidate.casefold()
+		if candidateKey in seen:
+			return
+		seen.add(candidateKey)
+		candidates.append(candidate)
+
+	for key in preferredKeys:
+		_addCandidate(attributeMap.get(key))
+	for key, value in attributeMap.items():
+		keyLower = key.casefold()
+		if "label" in keyLower or "name" in keyLower or "title" in keyLower:
+			_addCandidate(value)
+	return tuple(candidates)
+
+
+def _getAccessibleIdCandidate(
+	accessible,
+	*,
+	applicationName: str | None,
+) -> str | None:
+	accessibleId = _getAccessibleId(accessible)
+	if not accessibleId:
+		return None
+	if applicationName and accessibleId.casefold() == applicationName.casefold():
+		return None
+	if any(separator in accessibleId for separator in (".", "/", "::")):
+		return None
+	if len(accessibleId) > 48:
+		return None
+	if not any(character.isalpha() for character in accessibleId):
+		return None
+	normalizedId = _normalizeAccessibleName(accessibleId.replace("_", " ").replace("-", " "))
+	if not _isUsableAccessibleNameCandidate(normalizedId, applicationName=applicationName):
+		return None
+	return normalizedId
+
+
+def _getAccessibleActionMetadata(accessible) -> tuple[str, ...]:
+	if accessible is None:
+		return ()
+	getActionCount = getattr(accessible, "get_n_actions", None)
+	if not callable(getActionCount):
+		return ()
+	try:
+		actionCount = min(int(getActionCount() or 0), 4)
+	except Exception:
+		return ()
+	if actionCount <= 0:
+		return ()
+	actionMetadata: list[str] = []
+	for actionIndex in range(actionCount):
+		actionBits: list[str] = []
+		for methodName in ("get_localized_name", "get_action_name", "get_action_description"):
+			method = getattr(accessible, methodName, None)
+			if not callable(method):
+				continue
+			try:
+				value = _normalizeAccessibleName(method(actionIndex))
+			except Exception:
+				value = None
+			if value:
+				actionBits.append(f"{methodName}={value!r}")
+		if actionBits:
+			actionMetadata.append(f"{actionIndex}:{{{', '.join(actionBits)}}}")
+	return tuple(actionMetadata)
 
 
 def _getAccessibleTextContent(accessible) -> str | None:
@@ -546,6 +695,12 @@ def _iterFallbackNameCandidates(
 	_addCandidate(_getAccessibleDescription(accessible))
 	_addCandidate(_getAccessibleHelpText(accessible))
 	_addCandidate(_getAccessibleTextContent(accessible))
+	for candidate in _iterAccessibleAttributeCandidates(
+		accessible,
+		applicationName=applicationName,
+	):
+		_addCandidate(candidate)
+	_addCandidate(_getAccessibleIdCandidate(accessible, applicationName=applicationName))
 	if includeRelations:
 		relationTypes = {
 			getattr(Atspi.RelationType, "LABELLED_BY", None),
@@ -567,33 +722,76 @@ def _iterFallbackNameCandidates(
 	return tuple(candidates)
 
 
-def describeAccessibleNameSources(
+def _describeAccessibleDebugNode(
 	accessible,
 	*,
-	maxChildren: int = 4,
+	applicationName: str | None,
+	depth: int,
+	maxDepth: int,
+	maxChildrenPerNode: int,
 ) -> str:
-	applicationName = _getHostApplicationName(accessible)
-	roleName = _getAccessibleRole(accessible)
-	candidates = _iterFallbackNameCandidates(
+	nodeRole = _getAccessibleRole(accessible)
+	nodeName = _getAccessibleSelfName(accessible)
+	nodeDescription = _getAccessibleDescription(accessible)
+	nodeText = _getAccessibleTextContent(accessible)
+	nodeId = _getAccessibleId(accessible)
+	nodeAttributes = _getAccessibleAttributes(accessible)
+	nodeActionMetadata = _getAccessibleActionMetadata(accessible)
+	nodeCandidates = _iterFallbackNameCandidates(
 		accessible,
 		applicationName=applicationName,
+		includeRelations=False,
 	)
-	childDescriptions: list[str] = []
-	for childIndex in range(min(_getAccessibleChildCount(accessible), maxChildren)):
+	childCount = _getAccessibleChildCount(accessible)
+	parts = [
+		f"role={nodeRole}",
+		f"name={nodeName!r}",
+		f"desc={nodeDescription!r}",
+		f"text={nodeText!r}",
+		f"id={nodeId!r}",
+		f"candidates={nodeCandidates!r}",
+		f"attrs={nodeAttributes!r}",
+	]
+	if nodeActionMetadata:
+		parts.append(f"actions={nodeActionMetadata!r}")
+	if depth >= maxDepth or childCount <= 0:
+		return "{" + " ".join(parts) + "}"
+	children: list[str] = []
+	for childIndex in range(min(childCount, maxChildrenPerNode)):
 		child = _getAccessibleChild(accessible, childIndex)
 		if child is None:
 			continue
-		childCandidates = _iterFallbackNameCandidates(
-			child,
-			applicationName=applicationName,
-			includeRelations=False,
+		children.append(
+			f"{childIndex}:"
+			+ _describeAccessibleDebugNode(
+				child,
+				applicationName=applicationName,
+				depth=depth + 1,
+				maxDepth=maxDepth,
+				maxChildrenPerNode=maxChildrenPerNode,
+			)
 		)
-		childDescriptions.append(
-			f"{childIndex}:{_getAccessibleRole(child)}:{childCandidates!r}"
-		)
+	if children:
+		parts.append(f"children=[{', '.join(children)}]")
+	return "{" + " ".join(parts) + "}"
+
+
+def describeAccessibleNameSources(
+	accessible,
+	*,
+	maxDepth: int = 3,
+	maxChildrenPerNode: int = 4,
+) -> str:
+	applicationName = _getHostApplicationName(accessible)
 	return (
-		f"role={roleName} app={applicationName!r} "
-		f"candidates={candidates!r} children=[{', '.join(childDescriptions)}]"
+		f"app={applicationName!r} "
+		+ _describeAccessibleDebugNode(
+			accessible,
+			applicationName=applicationName,
+			depth=0,
+			maxDepth=maxDepth,
+			maxChildrenPerNode=maxChildrenPerNode,
+		)
 	)
 
 
