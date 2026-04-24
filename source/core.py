@@ -13,14 +13,11 @@ from typing import (
 	List,
 	Optional,
 )
-import comtypes
 import sys
-import winVersion
 import threading
 import os
 import time
 from enum import Enum
-import winBindings.kernel32
 import logHandler
 import languageHandler
 import globalVars
@@ -559,8 +556,8 @@ def _handleNVDAModuleCleanupBeforeGUIExit():
 	"""
 	import brailleViewer
 	import globalPluginHandler
-	import watchdog
 	import _remoteClient
+	import systemPlatform
 
 	try:
 		import updateCheck
@@ -570,8 +567,7 @@ def _handleNVDAModuleCleanupBeforeGUIExit():
 	except RuntimeError:
 		pass
 
-	# The core is expected to terminate, so we should not treat this as a crash
-	_terminate(watchdog)
+	systemPlatform.getPlatform().cleanup_before_gui_exit(_terminate)
 	# plugins must be allowed to close safely before we terminate the GUI as dialogs may be unsaved
 	_terminate(globalPluginHandler)
 	# the brailleViewer should be destroyed safely before closing the window
@@ -582,7 +578,7 @@ def _handleNVDAModuleCleanupBeforeGUIExit():
 
 def _initializeObjectCaches():
 	"""
-	Caches the desktop object.
+	Caches the desktop object for the active platform.
 	This may make information from the desktop window available on the lock screen,
 	however no known exploit is known for this.
 
@@ -592,16 +588,9 @@ def _initializeObjectCaches():
 	E.G. An app module for a lockScreen window.
 	The desktop object is an NVDA object without event handlers associated with it.
 	"""
-	import api
-	import NVDAObjects
-	import winUser
+	import systemPlatform
 
-	desktopObject = NVDAObjects.window.Window(windowHandle=winUser.getDesktopWindow())
-	api.setDesktopObject(desktopObject)
-	api.setForegroundObject(desktopObject)
-	api.setFocusObject(desktopObject)
-	api.setNavigatorObject(desktopObject)
-	api.setMouseObject(desktopObject)
+	systemPlatform.getPlatform().initialize_object_caches()
 
 
 def _doLoseFocus():
@@ -651,6 +640,8 @@ def _setUpWxApp() -> "wx.App":
 	# However, when running as a Windows Store application, we do want to request to be restarted for updates
 	def onQueryEndSession(evt):
 		if config.isAppX:
+			import winBindings.kernel32
+
 			# Automatically restart NVDA on Windows Store update
 			winBindings.kernel32.RegisterApplicationRestart(None, 0)
 
@@ -682,15 +673,15 @@ def main():
 	which checks the queues and executes functions when requested.
 	Finally, it starts the wx main loop.
 	"""
-	log.debug("Core starting")
-	if NVDAState.isRunningAsSource():
-		# When running as packaged version, DPI awareness is set via the app manifest.
-		from winAPI.dpiAwareness import setDPIAwareness
+	import systemPlatform
 
-		setDPIAwareness()
+	currentPlatform = systemPlatform.getPlatform()
+	platformBootstrapRuntime = None
+	platformRuntime = None
+	log.debug("Core starting")
+	currentPlatform.initialize_dpi_awareness(running_as_source=NVDAState.isRunningAsSource())
 
 	import config
-	from utils.security import isRunningOnSecureDesktop
 
 	if (
 		# No config flag was set, use default config path.
@@ -699,7 +690,7 @@ def main():
 			# Secure mode enabled, force default config path.
 			globalVars.appArgs.secure
 			# Secure desktop config is forced to sys.prefix/systemConfig
-			and not isRunningOnSecureDesktop()
+			and not currentPlatform.is_running_on_secure_desktop()
 		)
 	):
 		WritePaths.configDir = config.getUserDefaultConfigPath(
@@ -720,23 +711,34 @@ def main():
 		lang = config.conf["general"]["language"]
 	log.debug(f"setting language to {lang}")
 	languageHandler.setLanguage(lang)
-	import NVDAHelper
-
-	log.debug("Initializing NVDAHelper")
-	NVDAHelper.initialize()
-	import nvwave
-
-	log.debug("initializing nvwave")
-	nvwave.initialize()
-	if not globalVars.appArgs.minimal and config.conf["general"]["playStartAndExitSounds"]:
-		try:
-			nvwave.playWaveFile(os.path.join(globalVars.appDir, "waves", "start.wav"))
-		except Exception:
-			pass
+	platformBootstrapRuntime = currentPlatform.initialize_platform_bootstrap_runtime(
+		app_args=globalVars.appArgs,
+		config=config,
+		app_dir=globalVars.appDir,
+		log=log,
+	)
 	logHandler.setLogLevelFromConfig()
-	log.info(f"Windows version: {winVersion.getWinVer()}")
+	currentPlatform.log_runtime_info(log)
 	log.info("Using Python version %s" % sys.version)
-	log.info("Using comtypes version %s" % comtypes.__version__)
+	try:
+		import comtypes
+	except ImportError:
+		log.info("comtypes not available")
+	else:
+		log.info("Using comtypes version %s" % comtypes.__version__)
+	if currentPlatform.uses_headless_core_runtime():
+		_runHeadlessCoreRuntime(
+			currentPlatform=currentPlatform,
+			platformBootstrapRuntime=platformBootstrapRuntime,
+			config=config,
+		)
+		return
+	if not currentPlatform.is_runtime_supported():
+		currentPlatform.show_error(
+			"Unsupported platform",
+			currentPlatform.get_runtime_unsupported_message(),
+		)
+		raise SystemExit(1)
 	from utils import schedule
 
 	schedule.initialize()
@@ -755,6 +757,12 @@ def main():
 
 	dataManager.initialize()
 	addonHandler.initialize()
+	if not currentPlatform.is_runtime_supported():
+		currentPlatform.show_error(
+			"Unsupported platform",
+			currentPlatform.get_runtime_unsupported_message(),
+		)
+		raise SystemExit(1)
 	from gui import addonStoreGui
 
 	addonStoreGui.initialize()
@@ -869,54 +877,10 @@ def main():
 	garbageHandler.initialize()
 
 	_initializeObjectCaches()
-
-	import JABHandler
-
-	log.debug("initializing Java Access Bridge support")
-	try:
-		JABHandler.initialize()
-		log.info("Java Access Bridge support initialized")
-	except NotImplementedError:
-		log.warning("Java Access Bridge not available")
-	except:  # noqa: E722
-		log.error("Error initializing Java Access Bridge support", exc_info=True)
-	import winConsoleHandler
-
-	log.debug("Initializing legacy winConsole support")
-	winConsoleHandler.initialize()
-	import UIAHandler
-
-	log.debug("Initializing UIA support")
-	try:
-		UIAHandler.initialize()
-	except RuntimeError:
-		log.warning("UIA disabled in configuration")
-	except:  # noqa: E722
-		log.error("Error initializing UIA support", exc_info=True)
-	import IAccessibleHandler
-
-	log.debug("Initializing IAccessible support")
-	IAccessibleHandler.initialize()
-	log.debug("Initializing input core")
-	import inputCore
-
-	inputCore.initialize()
-	import keyboardHandler
-	import watchdog
-
-	log.debug("Initializing keyboard handler")
-	keyboardHandler.initialize(watchdog.WatchdogObserver())
-	import mouseHandler
-
-	log.debug("initializing mouse handler")
-	mouseHandler.initialize()
-	import touchHandler
-
-	log.debug("Initializing touchHandler")
-	try:
-		touchHandler.initialize()
-	except NotImplementedError:
-		pass
+	platformRuntime = currentPlatform.initialize_core_runtime(
+		bootstrap_runtime=platformBootstrapRuntime,
+		log=log,
+	)
 	import globalPluginHandler
 
 	log.debug("Initializing global plugin handler")
@@ -1004,24 +968,19 @@ def main():
 				log.error("Pumping but pump wasn't pending", stack_info=True)
 			self.isPumping = True
 			self.pending = _PumpPending.NONE
-			watchdog.alive()
 			try:
-				if touchHandler.handler:
-					touchHandler.handler.pump()
-				JABHandler.pumpAll()
-				IAccessibleHandler.pumpAll()
-				queueHandler.pumpAll()
-				mouseHandler.pumpAll()
-				braille.pumpAll()
-				vision.pumpAll()
-				sessionTracking.pumpAll()
+				currentPlatform.pump_core_runtime(
+					platformRuntime,
+					queue_pump=queueHandler.pumpAll,
+					braille_pump=braille.pumpAll,
+					vision_pump=vision.pumpAll,
+				)
 			except Exception:
 				log.exception("errors in this core pump cycle")
 			try:
 				baseObject.AutoPropertyObject.invalidateCaches()
 			except Exception:
 				log.exception("AutoPropertyObject.invalidateCaches failed")
-			watchdog.asleep()
 			self.isPumping = False
 			# #3803: If another pump was requested during this pump execution, we need
 			# to trigger another pump, as our pump is not re-entrant.
@@ -1037,8 +996,7 @@ def main():
 	_pump = CorePump()
 	requestPump()
 
-	log.debug("Initializing watchdog")
-	watchdog.initialize()
+	currentPlatform.initialize_core_runtime_monitoring(platformRuntime, log=log)
 	try:
 		import updateCheck
 	except RuntimeError:
@@ -1049,9 +1007,7 @@ def main():
 		updateCheck.initialize()
 		log.debug(f"NVDA user ID {updateCheck.state['id']}")
 
-	from winAPI import sessionTracking
-
-	sessionTracking.initialize()
+	currentPlatform.finalize_core_runtime_startup(platformRuntime, log=log)
 
 	NVDAState._TrackNVDAInitialization.markInitializationComplete()
 
@@ -1091,16 +1047,9 @@ def main():
 	import treeInterceptorHandler
 
 	_terminate(treeInterceptorHandler)
-	_terminate(IAccessibleHandler, name="IAccessible support")
-	_terminate(UIAHandler, name="UIA support")
-	_terminate(winConsoleHandler, name="Legacy winConsole support")
-	_terminate(JABHandler, name="Java Access Bridge support")
+	currentPlatform.terminate_core_runtime(platformRuntime, _terminate, log=log)
 	_terminate(appModuleHandler, name="app module handler")
 	_terminate(tones)
-	_terminate(touchHandler)
-	_terminate(keyboardHandler, name="keyboard handler")
-	_terminate(mouseHandler)
-	_terminate(inputCore)
 	_terminate(screenCurtain)
 	_terminate(vision)
 	_terminate(brailleInput)
@@ -1116,17 +1065,14 @@ def main():
 	_terminate(garbageHandler)
 	_terminate(schedule, name="task scheduler")
 
-	if not globalVars.appArgs.minimal and config.conf["general"]["playStartAndExitSounds"]:
-		try:
-			nvwave.playWaveFile(
-				os.path.join(globalVars.appDir, "waves", "exit.wav"),
-				asynchronous=False,
-			)
-		except:  # noqa: E722
-			pass
-	# We cannot terminate nvwave until after we perform nvwave.playWaveFile
-	_terminate(nvwave)
-	_terminate(NVDAHelper)
+	currentPlatform.terminate_platform_bootstrap_runtime(
+		platformBootstrapRuntime,
+		_terminate,
+		app_args=globalVars.appArgs,
+		config=config,
+		app_dir=globalVars.appDir,
+		log=log,
+	)
 	# Log and join any remaining non-daemon threads here,
 	# before releasing our mutex and exiting.
 	# In a perfect world there should be none.
@@ -1142,6 +1088,38 @@ def main():
 	# so new instances of NVDA can find this one even if it freezes during exit.
 	messageWindow.destroy()
 	log.debug("core done")
+
+
+def _runHeadlessCoreRuntime(
+	*,
+	currentPlatform,
+	platformBootstrapRuntime: object | None,
+	config,
+) -> None:
+	platformRuntime = currentPlatform.initialize_core_runtime(
+		bootstrap_runtime=platformBootstrapRuntime,
+		log=log,
+	)
+	currentPlatform.initialize_core_runtime_monitoring(platformRuntime, log=log)
+	currentPlatform.finalize_core_runtime_startup(platformRuntime, log=log)
+	NVDAState._TrackNVDAInitialization.markInitializationComplete()
+	log.info("NVDA initialized (%s headless runtime)", currentPlatform.name)
+	try:
+		currentPlatform.run_headless_core_loop(platformRuntime, log=log)
+	except KeyboardInterrupt:
+		pass
+	finally:
+		log.info("Exiting headless runtime")
+		currentPlatform.terminate_core_runtime(platformRuntime, _terminate, log=log)
+		currentPlatform.terminate_platform_bootstrap_runtime(
+			platformBootstrapRuntime,
+			_terminate,
+			app_args=globalVars.appArgs,
+			config=config,
+			app_dir=globalVars.appDir,
+			log=log,
+		)
+		log.debug("core done")
 
 
 def _terminate(module, name=None):

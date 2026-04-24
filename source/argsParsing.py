@@ -5,9 +5,13 @@
 
 import argparse
 import sys
-import winUser
 
 from typing import IO
+
+try:
+	import winUser
+except ImportError:
+	winUser = None
 
 
 class _WideParserHelpFormatter(argparse.RawTextHelpFormatter):
@@ -30,14 +34,19 @@ class NoConsoleOptionParser(argparse.ArgumentParser):
 	"""
 
 	def print_help(self, file: IO[str] | None = None):
-		"""Shows help in a standard Windows message dialog"""
+		"""Shows help in a Windows message dialog or prints to the console on other platforms."""
+		if winUser is None:
+			super().print_help(file or sys.stdout)
+			return
 		winUser.MessageBox(0, self.format_help(), "Help", 0)
 
 	def error(self, message: str):
-		"""Shows an error in a standard Windows message dialog, and then exits NVDA"""
+		"""Shows an error in a Windows message dialog or prints to stderr on other platforms."""
 		out = ""
 		out = self.format_usage()
 		out += f"\nerror: {message}"
+		if winUser is None:
+			self.exit(2, out + "\n")
 		winUser.MessageBox(0, out, "Command-line Argument Error", winUser.MB_ICONERROR)
 		sys.exit(2)
 

@@ -13,12 +13,9 @@ import threading
 import warnings
 import logging
 import inspect
-import winsound
 import traceback
 from types import FunctionType, TracebackType
 import globalVars
-import winBindings.kernel32
-import winKernel
 import buildVersion
 from typing import (
 	Any,
@@ -31,6 +28,27 @@ import exceptions
 import RPCConstants
 import NVDAState
 from NVDAState import WritePaths
+
+try:
+	import winsound
+except ImportError:
+	winsound = None
+
+try:
+	import winBindings.kernel32 as kernel32
+except ImportError:
+	kernel32 = None
+
+try:
+	import winKernel
+except ImportError:
+	winKernel = None
+
+
+try:
+	WindowsError
+except NameError:
+	WindowsError = OSError
 
 
 if TYPE_CHECKING:
@@ -335,7 +353,10 @@ class Logger(logging.Logger):
 		Normally, it will be logged at level "ERROR".
 		However, certain exceptions which aren't considered errors (or aren't errors that we can fix) are expected and will therefore be logged at a lower level.
 		"""
-		import comtypes
+		try:
+			import comtypes
+		except ImportError:
+			comtypes = None
 
 		if exc_info is True:
 			exc_info = sys.exc_info()
@@ -358,7 +379,8 @@ class Logger(logging.Logger):
 				)
 			)
 			or (
-				isinstance(exc, comtypes.COMError)
+				comtypes is not None
+				and isinstance(exc, comtypes.COMError)
 				and (
 					exc.hresult
 					in (
@@ -425,15 +447,16 @@ class Logger(logging.Logger):
 
 class RemoteHandler(logging.Handler):
 	def __init__(self):
-		import winBindings.kernel32
+		if kernel32 is None or winKernel is None:
+			raise RuntimeError("Remote logging is only available on Windows")
 
-		h = winBindings.kernel32.LoadLibraryEx(
+		h = kernel32.LoadLibraryEx(
 			NVDAState.ReadPaths.nvdaHelperRemoteDll,
 			0,
 			# Using an altered search path is necessary here
 			# As NVDAHelperRemote needs to locate dependent dlls in the same directory
 			# such as IAccessible2proxy.dll.
-			winKernel.LOAD_WITH_ALTERED_SEARCH_PATH,
+			LOAD_WITH_ALTERED_SEARCH_PATH,
 		)
 		self._remoteLib = ctypes.CDLL("nvdaHelperRemote", handle=h)
 		logging.Handler.__init__(self)
@@ -448,7 +471,7 @@ class RemoteHandler(logging.Handler):
 
 class FileHandler(logging.FileHandler):
 	def handle(self, record):
-		if record.levelno >= logging.CRITICAL:
+		if record.levelno >= logging.CRITICAL and winsound is not None:
 			winsound.MessageBeep(winsound.MB_ICONHAND)
 		elif record.levelno >= logging.ERROR and shouldPlayErrorSound():
 			getOnErrorSoundRequested().notify()
@@ -478,10 +501,12 @@ class Formatter(logging.Formatter):
 		since it causes a crash under some versions of Universal CRT when Python locale
 		is set to a Unicode one (#12160, Python issue 36792)
 		"""
+		if kernel32 is None or winKernel is None:
+			return super().formatTime(record, datefmt)
 		timeAsFileTime = winKernel.time_tToFileTime(record.created)
-		timeAsSystemTime = winBindings.kernel32.SYSTEMTIME()
+		timeAsSystemTime = kernel32.SYSTEMTIME()
 		winKernel.FileTimeToSystemTime(timeAsFileTime, timeAsSystemTime)
-		timeAsLocalTime = winBindings.kernel32.SYSTEMTIME()
+		timeAsLocalTime = kernel32.SYSTEMTIME()
 		winKernel.SystemTimeToTzSpecificLocalTime(None, timeAsSystemTime, timeAsLocalTime)
 		res = f"{timeAsLocalTime.wHour:02d}:{timeAsLocalTime.wMinute:02d}:{timeAsLocalTime.wSecond:02d}"
 		return self.default_msec_format % (res, record.msecs)

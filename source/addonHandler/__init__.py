@@ -31,8 +31,6 @@ import config
 from config.registry import ADDON_BUNDLE_EXTENSION
 import languageHandler
 from logHandler import log
-from utils.security import isRunningOnSecureDesktop
-import winBindings.kernel32
 import addonAPIVersion
 import importlib
 import NVDAState
@@ -53,6 +51,11 @@ from .packaging import (
 	initializeModulePackagePaths,
 	isModuleName,
 )
+
+try:
+	import winBindings.kernel32 as kernel32
+except ImportError:
+	kernel32 = None
 
 if TYPE_CHECKING:
 	from addonStore.models.addon import (  # noqa: F401
@@ -111,6 +114,12 @@ _failedPendingInstalls: CaseInsensitiveSet[str] = CaseInsensitiveSet()
 
 
 AddonStateDictT = dict[AddonStateCategory, CaseInsensitiveSet[str]]
+
+
+def _isRunningOnSecureDesktop() -> bool:
+	import systemPlatform
+
+	return systemPlatform.getPlatform().is_running_on_secure_desktop()
 
 
 class AddonsState(collections.UserDict[AddonStateCategory, CaseInsensitiveSet[str]]):
@@ -232,7 +241,7 @@ class AddonsState(collections.UserDict[AddonStateCategory, CaseInsensitiveSet[st
 		if os.path.isfile(self.statePath):
 			self._load(self.statePath)
 		else:
-			if not isRunningOnSecureDesktop() and os.path.isfile(WritePaths._oldAddonStateFile):
+			if not _isRunningOnSecureDesktop() and os.path.isfile(WritePaths._oldAddonStateFile):
 				# Only import if absolutely necessary.
 				from ._pickleToJsonMigration import _getAddonsStateDictFromPickle
 
@@ -1052,7 +1061,7 @@ class AddonBundle(AddonBase):
 					# #2505: Handle non-Unicode file names.
 					# Most archivers seem to use the local OEM code page, even though the spec says only cp437.
 					# HACK: Overriding info.filename is a bit ugly, but it avoids a lot of code duplication.
-					oemcp = winBindings.kernel32.GetOEMCP()
+					oemcp = kernel32.GetOEMCP() if kernel32 is not None else 437
 					info.filename = info.filename.decode(f"cp{oemcp}")
 				z.extract(info, addonPath)
 

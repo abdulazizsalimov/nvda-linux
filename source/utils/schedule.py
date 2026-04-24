@@ -3,16 +3,64 @@
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
+from __future__ import annotations
+
 from datetime import datetime
 from enum import Enum, auto
 import threading
 import time
 from typing import Callable
 
-import schedule
+try:
+	import schedule as _scheduleLib
+except ImportError:
+	_scheduleLib = None
 
 from logHandler import log
 import NVDAState
+
+
+class _ScheduleJobStub:
+	def __init__(self) -> None:
+		self.at_time = None
+		self.next_run = None
+		self.job_func = None
+
+	@property
+	def day(self) -> "_ScheduleJobStub":
+		return self
+
+	def at(self, cronTime: str) -> "_ScheduleJobStub":
+		self.at_time = cronTime
+		self.next_run = cronTime
+		return self
+
+	def do(self, job_func, *args, **kwargs) -> "_ScheduleJobStub":
+		self.job_func = job_func
+		_scheduleJobs.append(self)
+		return self
+
+
+class _ScheduleModuleStub:
+	Job = _ScheduleJobStub
+
+	def every(self) -> _ScheduleJobStub:
+		return _ScheduleJobStub()
+
+	@property
+	def jobs(self) -> list[_ScheduleJobStub]:
+		return _scheduleJobs
+
+	def run_pending(self) -> None:
+		pass
+
+	def clear(self) -> None:
+		_scheduleJobs.clear()
+
+
+_scheduleJobs: list[_ScheduleJobStub] = []
+schedule = _scheduleLib if _scheduleLib is not None else _ScheduleModuleStub()
+_hasRealScheduleSupport = _scheduleLib is not None
 
 scheduleThread: "ScheduleThread | None" = None
 
@@ -225,6 +273,8 @@ class ScheduleThread(threading.Thread):
 
 def initialize():
 	global scheduleThread
+	if not _hasRealScheduleSupport:
+		log.warning("python-schedule dependency is not available; scheduled background jobs are disabled")
 	scheduleThread = ScheduleThread(daemon=True)
 	scheduleThread.start()
 

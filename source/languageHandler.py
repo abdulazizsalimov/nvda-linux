@@ -18,8 +18,16 @@ import gettext
 import enum
 import globalVars
 from logHandler import log
-import winBindings.kernel32
-import winKernel
+
+try:
+	import winBindings.kernel32 as kernel32
+except ImportError:
+	kernel32 = None
+
+try:
+	import winKernel
+except ImportError:
+	winKernel = None
 
 # a few Windows locale constants
 LOCALE_USER_DEFAULT = 0x400
@@ -64,6 +72,10 @@ These are Windows LCIDs that are used in NVDA but are not found in locale.window
 These have been added when new locales have been introduced to the translation system and
 we cannot use the results from the Windows function LCIDToLocaleName.
 """
+
+
+def _hasWindowsLocaleApis() -> bool:
+	return kernel32 is not None
 
 
 class LOCALE(enum.IntEnum):
@@ -115,8 +127,10 @@ def localeNameToWindowsLCID(localeName: str) -> int:
 	"""
 	# Windows Vista (NT 6.0) and later is able to convert locale names to LCIDs.
 	# Because NVDA supports Windows 7 (NT 6.1) SP1 and later, just use it directly.
+	if not _hasWindowsLocaleApis():
+		return LCID_NONE
 	localeName = normalizeLocaleForWin32(localeName)
-	LCID = winBindings.kernel32.LocaleNameToLCID(localeName, 0)
+	LCID = kernel32.LocaleNameToLCID(localeName, 0)
 	# #6259: In Windows 10, LOCALE_CUSTOM_UNSPECIFIED is returned for any locale name unknown to Windows.
 	# This was observed for Aragonese ("an").
 	# See https://msdn.microsoft.com/en-us/library/system.globalization.cultureinfo.lcid(v=vs.110).aspx.
@@ -144,7 +158,7 @@ def windowsLCIDToLocaleName(lcid: int) -> str | None:
 	# Check a manual mapping before using Windows to look up the correct LCID locale name.
 	if not localeName:
 		localeName = LCIDS_TO_TRANSLATED_LOCALES.get(lcid)
-	if not localeName:
+	if not localeName and winKernel is not None:
 		localeName = winKernel.LCIDToLocaleName(lcid)
 	if localeName:
 		return normalizeLanguage(localeName)
@@ -161,11 +175,11 @@ def getLanguageDescription(language: str) -> str | None:
 		buf = ctypes.create_unicode_buffer(1024)
 		# If the original locale didn't have country info (was just language) then make sure we just get language from Windows
 		if "_" not in language:
-			res = winBindings.kernel32.GetLocaleInfo(LCID, LOCALE.SLANGDISPLAYNAME, buf, 1024)
+			res = kernel32.GetLocaleInfo(LCID, LOCALE.SLANGDISPLAYNAME, buf, 1024)
 		else:
 			res = 0
 		if res == 0:
-			res = winBindings.kernel32.GetLocaleInfo(LCID, LOCALE.SLANGUAGE, buf, 1024)
+			res = kernel32.GetLocaleInfo(LCID, LOCALE.SLANGUAGE, buf, 1024)
 		desc = str(buf.value)
 	if not desc:
 		# Some hard-coded descriptions where we know the language fails on various configurations.
@@ -182,11 +196,13 @@ def getLanguageDescription(language: str) -> str | None:
 def englishLanguageNameFromNVDALocale(localeName: str) -> str | None:
 	"""Returns either English name of the given language  using `GetLocaleInfoEx` or None
 	if the given locale is not known to Windows."""
+	if not _hasWindowsLocaleApis():
+		return None
 	localeName = normalizeLocaleForWin32(localeName)
-	buffLength = winBindings.kernel32.GetLocaleInfoEx(localeName, LOCALE.SENGLISHLANGUAGENAME, None, 0)
+	buffLength = kernel32.GetLocaleInfoEx(localeName, LOCALE.SENGLISHLANGUAGENAME, None, 0)
 	if buffLength:
 		buf = ctypes.create_unicode_buffer(buffLength)
-		winBindings.kernel32.GetLocaleInfoEx(localeName, LOCALE.SENGLISHLANGUAGENAME, buf, buffLength)
+		kernel32.GetLocaleInfoEx(localeName, LOCALE.SENGLISHLANGUAGENAME, buf, buffLength)
 		langName = buf.value
 		if "Unknown" in langName:
 			# Windows 10 returns 'Unknown' for locales not known to Windows
@@ -215,11 +231,13 @@ def englishLanguageNameFromNVDALocale(localeName: str) -> str | None:
 def englishCountryNameFromNVDALocale(localeName: str) -> str | None:
 	"""Returns either English name of the given country using GetLocaleInfoEx or None
 	if the given locale is not known to Windows."""
+	if not _hasWindowsLocaleApis():
+		return None
 	localeName = normalizeLocaleForWin32(localeName)
-	buffLength = winBindings.kernel32.GetLocaleInfoEx(localeName, LOCALE.SENGLISHCOUNTRYNAME, None, 0)
+	buffLength = kernel32.GetLocaleInfoEx(localeName, LOCALE.SENGLISHCOUNTRYNAME, None, 0)
 	if buffLength:
 		buf = ctypes.create_unicode_buffer(buffLength)
-		winBindings.kernel32.GetLocaleInfoEx(localeName, LOCALE.SENGLISHCOUNTRYNAME, buf, buffLength)
+		kernel32.GetLocaleInfoEx(localeName, LOCALE.SENGLISHCOUNTRYNAME, buf, buffLength)
 		if "Unknown" in buf.value:
 			# Windows 10 returns 'Unknown region' for locales not known to Windows
 			# even though documentation states that in case of an unknown locale 0 is returned.
@@ -234,6 +252,8 @@ def englishCountryNameFromNVDALocale(localeName: str) -> str | None:
 def ansiCodePageFromNVDALocale(localeName: str) -> str | None:
 	"""Returns either ANSI code page for a given locale using GetLocaleInfoEx or None
 	if the given locale is not known to Windows."""
+	if not _hasWindowsLocaleApis():
+		return None
 	localeName = normalizeLocaleForWin32(localeName)
 	# Windows 10 returns English code page (1252) for locales not known to Windows
 	# even though documentation states that in case of an unknown locale 0 is returned.
@@ -243,15 +263,15 @@ def ansiCodePageFromNVDALocale(localeName: str) -> str | None:
 	# before attempting to retrieve code page.
 	if not englishCountryNameFromNVDALocale(localeName):
 		return None
-	buffLength = winBindings.kernel32.GetLocaleInfoEx(localeName, LOCALE.IDEFAULTANSICODEPAGE, None, 0)
+	buffLength = kernel32.GetLocaleInfoEx(localeName, LOCALE.IDEFAULTANSICODEPAGE, None, 0)
 	if buffLength:
 		buf = ctypes.create_unicode_buffer(buffLength)
-		winBindings.kernel32.GetLocaleInfoEx(localeName, LOCALE.IDEFAULTANSICODEPAGE, buf, buffLength)
+		kernel32.GetLocaleInfoEx(localeName, LOCALE.IDEFAULTANSICODEPAGE, buf, buffLength)
 		codePage = buf.value
 		if codePage == CP_ACP:
 			# Some locales such as Hindi are Unicode only i.e. they don't have specific ANSI code page.
 			# In such case code page should be set to the default ANSI code page of the system.
-			codePage = str(winBindings.kernel32.GetACP())
+			codePage = str(kernel32.GetACP())
 		return codePage
 	return None
 
@@ -309,7 +329,9 @@ def getWindowsLanguage():
 	"""
 	Fetches the locale name of the user's configured language in Windows.
 	"""
-	windowsLCID = winBindings.kernel32.GetUserDefaultUILanguage()
+	if not _hasWindowsLocaleApis():
+		return "en"
+	windowsLCID = kernel32.GetUserDefaultUILanguage()
 	localeName = windowsLCIDToLocaleName(windowsLCID)
 	if localeName:
 		localeName = normalizeLanguage(localeName)
@@ -347,7 +369,7 @@ def setLanguage(lang: str) -> None:
 		localeName = lang
 		# Set the windows locale for this thread (NVDA core) to this locale.
 		LCID = localeNameToWindowsLCID(lang)
-		if winBindings.kernel32.SetThreadLocale(LCID) == 0:
+		if _hasWindowsLocaleApis() and kernel32.SetThreadLocale(LCID) == 0:
 			log.debugWarning(f"couldn't set windows thread locale to {lang}")
 
 	trans, validatedLocalName = _createGettextTranslation(localeName)
@@ -469,9 +491,11 @@ def useImperialMeasurements() -> bool:
 	"""
 	Whether or not measurements should be reported as imperial, rather than metric.
 	"""
+	if not _hasWindowsLocaleApis():
+		return False
 	bufLength = 2
 	buf = ctypes.create_unicode_buffer(bufLength)
-	if not winBindings.kernel32.GetLocaleInfoEx(None, LOCALE.IMEASURE, buf, bufLength):
+	if not kernel32.GetLocaleInfoEx(None, LOCALE.IMEASURE, buf, bufLength):
 		raise RuntimeError("LOCALE.IMEASURE not supported")
 	return buf.value == "1"
 

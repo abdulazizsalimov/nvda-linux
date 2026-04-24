@@ -4,9 +4,22 @@
 # See the file COPYING for more details.
 
 from enum import Enum, nonmember
-import winreg
 
-from winBindings.advapi32 import RegDeleteTree
+try:
+	import winreg
+except ImportError:
+	winreg = None
+
+try:
+	from winBindings.advapi32 import RegDeleteTree
+except ImportError:
+	RegDeleteTree = None
+
+
+try:
+	WindowsError
+except NameError:
+	WindowsError = OSError
 
 
 EASE_OF_ACCESS_APP_KEY_NAME = "nvda_nvda_v1"
@@ -64,8 +77,14 @@ class _RegistryKeyX86(str, Enum):  # type: ignore[reportUnusedClass]
 	CURRENT_VERSION = rf"{_SOFTWARE}\Microsoft\Windows\CurrentVersion"
 
 
+def _requireWindowsRegistry(feature: str) -> None:
+	if winreg is None or RegDeleteTree is None:
+		raise RuntimeError(f"{feature} is only available on Windows")
+
+
 def _deleteKeyAndSubkeys(key: int, subkey: str, access: int = 0) -> None:
 	"""Delete a registry key and all its subkeys using RegDeleteTree via winBindings.advapi32."""
+	_requireWindowsRegistry("Deleting registry keys")
 	with winreg.OpenKey(key, "", 0, winreg.KEY_WRITE | winreg.KEY_READ | access) as parent:
 		result = RegDeleteTree(
 			parent.handle,

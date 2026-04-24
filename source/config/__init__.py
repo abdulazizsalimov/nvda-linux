@@ -15,7 +15,6 @@ from enum import Enum
 from typing import Any
 
 import globalVars
-import winreg
 import os
 import sys
 import errno
@@ -28,13 +27,25 @@ from configobj.validate import Validator
 from logHandler import log
 import logging
 from utils.caseInsensitiveCollections import CaseInsensitiveSet
-import winBindings.shell32
-from shlobj import FolderId, SHGetKnownFolderPath
 import baseObject
-import easeOfAccess
-from fileUtils import FaultTolerantFile
 import extensionPoints
 import functools
+
+try:
+	import winreg
+except ImportError:
+	winreg = None
+
+try:
+	import winBindings.shell32 as shell32
+except ImportError:
+	shell32 = None
+
+try:
+	from shlobj import FolderId, SHGetKnownFolderPath
+except ImportError:
+	FolderId = None
+	SHGetKnownFolderPath = None
 
 from . import profileUpgrader
 from . import aggregatedSection
@@ -46,6 +57,12 @@ from .featureFlag import (
 from .registry import RegistryKey as _RegistryKey
 import NVDAState
 from NVDAState import WritePaths
+
+
+try:
+	WindowsError
+except NameError:
+	WindowsError = OSError
 
 #: True if NVDA is running as a Windows Store Desktop Bridge application
 isAppX = False
@@ -69,6 +86,25 @@ post_configSave = extensionPoints.Action()
 #: Handlers are called with a boolean argument indicating whether this is a factory reset (True) or just reloading from disk (False).
 pre_configReset = extensionPoints.Action()
 post_configReset = extensionPoints.Action()
+
+
+def _hasWindowsConfigSupport() -> bool:
+	return (
+		winreg is not None
+		and FolderId is not None
+		and SHGetKnownFolderPath is not None
+	)
+
+
+def _getEaseOfAccess():
+	import easeOfAccess
+
+	return easeOfAccess
+
+
+def _requireWindowsConfig(feature: str) -> None:
+	if not _hasWindowsConfigSupport():
+		raise RuntimeError(f"{feature} is only available on Windows")
 
 
 def __getattr__(attrName: str) -> Any:
@@ -120,6 +156,8 @@ def saveOnExit():
 
 def isInstalledCopy() -> bool:
 	"""Checks to see if this running copy of NVDA is installed on the system"""
+	if not _hasWindowsConfigSupport():
+		return False
 	try:
 		k = winreg.OpenKey(
 			winreg.HKEY_LOCAL_MACHINE,
@@ -163,6 +201,8 @@ def isInstalledCopy() -> bool:
 
 
 def getInstalledUserConfigPath() -> str | None:
+	if not _hasWindowsConfigSupport():
+		return None
 	try:
 		winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _RegistryKey.NVDA.value)
 	except FileNotFoundError:
@@ -267,6 +307,9 @@ def getStartAfterLogon() -> bool:
 	Checks if NVDA is set to start after a logon.
 	Checks related easeOfAccess current user registry keys.
 	"""
+	if sys.platform != "win32":
+		return False
+	easeOfAccess = _getEaseOfAccess()
 	return easeOfAccess.willAutoStart(easeOfAccess.AutoStartContext.AFTER_LOGON)
 
 
@@ -276,12 +319,14 @@ def setStartAfterLogon(enable: bool) -> None:
 	Toggle if NVDA automatically starts after a logon.
 	Sets easeOfAccess related registry keys.
 	"""
+	_requireWindowsConfig("Configuring automatic start after logon")
+	easeOfAccess = _getEaseOfAccess()
 	if getStartAfterLogon() == enable:
 		return
 	easeOfAccess.setAutoStart(easeOfAccess.AutoStartContext.AFTER_LOGON, enable)
 
 
-SLAVE_FILENAME = os.path.join(globalVars.appDir, "nvda_slave.exe")
+SLAVE_FILENAME = os.path.join(getattr(globalVars, "appDir", ""), "nvda_slave.exe")
 
 
 def getStartOnLogonScreen() -> bool:
@@ -291,10 +336,15 @@ def getStartOnLogonScreen() -> bool:
 
 	Checks related easeOfAccess local machine registry keys.
 	"""
+	if sys.platform != "win32":
+		return False
+	easeOfAccess = _getEaseOfAccess()
 	return easeOfAccess.willAutoStart(easeOfAccess.AutoStartContext.ON_LOGON_SCREEN)
 
 
 def _setStartOnLogonScreen(enable: bool) -> None:
+	_requireWindowsConfig("Configuring automatic start on the logon screen")
+	easeOfAccess = _getEaseOfAccess()
 	easeOfAccess.setAutoStart(easeOfAccess.AutoStartContext.ON_LOGON_SCREEN, enable)
 
 
@@ -310,8 +360,10 @@ def setSystemConfigToCurrentConfig(*, addonsToCopy: Collection[str] = ()):
 	:raises installer.RetriableFailure: If copying the user to the system config fails.
 	:raises RuntimeError: If calling ``nvda_slave`` fails for some other reason.
 	"""
+	if shell32 is None:
+		raise RuntimeError("Setting the system configuration is only available on Windows")
 	fromPath = WritePaths.configDir
-	if winBindings.shell32.IsUserAnAdmin():
+	if shell32.IsUserAnAdmin():
 		_setSystemConfig(fromPath, addonsToCopy=addonsToCopy)
 	else:
 		import systemUtils
@@ -436,6 +488,7 @@ def setStartOnLogonScreen(enable: bool) -> None:
 
 	Raises a RuntimeError on failure.
 	"""
+	_requireWindowsConfig("Configuring automatic start on the logon screen")
 	if getStartOnLogonScreen() == enable:
 		return
 	try:
@@ -719,6 +772,8 @@ class ConfigManager:
 		self._dirtyProfiles.add(self.profiles[-1].name)
 
 	def _writeProfileToFile(self, filename: str, profile: ConfigObj):
+		from fileUtils import FaultTolerantFile
+
 		with FaultTolerantFile(filename) as f:
 			profile.write(f)
 

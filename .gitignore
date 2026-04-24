@@ -37,6 +37,7 @@ extras/controllerClient/arm64
 source/_buildVersion.py
 output
 testOutput
+localRuntime
 launcher/nvda_logo.wav
 uninstaller/UAC.nsh
 *.pyc

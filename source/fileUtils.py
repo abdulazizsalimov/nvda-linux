@@ -8,12 +8,19 @@ import ctypes
 import array
 from contextlib import contextmanager
 from tempfile import NamedTemporaryFile
+import sys
 from logHandler import log
-import winKernel
-import shlobj
 from functools import wraps
-import systemUtils
-import winBindings.version
+
+if sys.platform == "win32":
+	import shlobj
+	import systemUtils
+	import winKernel
+	import winBindings.version
+else:
+	shlobj = None
+	systemUtils = None
+	winKernel = None
 
 
 @contextmanager
@@ -38,9 +45,12 @@ def FaultTolerantFile(name):
 		log.debug(f.name)
 		yield f
 		f.flush()
-		os.fsync(f)
+		os.fsync(f.fileno())
 		f.close()
-		winKernel.moveFileEx(f.name, name, winKernel.MOVEFILE_REPLACE_EXISTING)
+		if sys.platform == "win32":
+			winKernel.moveFileEx(f.name, name, winKernel.MOVEFILE_REPLACE_EXISTING)
+		else:
+			os.replace(f.name, name)
 
 
 def _suspendWow64RedirectionForFileInfoRetrieval(func):
@@ -55,6 +65,8 @@ def _suspendWow64RedirectionForFileInfoRetrieval(func):
 
 	@wraps(func)
 	def funcWrapper(filePath, *attributes):
+		if sys.platform != "win32":
+			return func(filePath, *attributes)
 		nativeSys32 = shlobj.SHGetKnownFolderPath(shlobj.FolderId.SYSTEM)
 		if (
 			systemUtils.hasSyswow64Dir()
@@ -80,6 +92,8 @@ def getFileVersionInfo(name: str, *attributes: str) -> dict[str, str | None]:
 
 	:raises RuntimeError: If the file does not exist, has no version information, or has no codepage.
 	"""
+	if sys.platform != "win32":
+		raise RuntimeError("File version information is only available on Windows")
 	if not os.path.exists(name):
 		raise RuntimeError("The file %s does not exist" % name)
 	fileVersionInfo = {}
