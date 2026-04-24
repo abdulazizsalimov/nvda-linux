@@ -55,6 +55,8 @@ class LinuxCoreRuntime:
 	speaker: EspeakSpeaker | None = None
 	lastAnnouncementKey: tuple[str, str | None] | None = None
 	lastAnnouncementTime: float = 0.0
+	lastPresentedSourceKey: int | None = None
+	lastPresentedSourceTime: float = 0.0
 
 
 class LinuxPlatform(SystemPlatform):
@@ -338,7 +340,12 @@ class LinuxPlatform(SystemPlatform):
 				if (
 					announcement
 					and runtime.speaker is not None
-					and self._shouldSpeakAnnouncement(runtime, announcement, resolvedObject)
+					and self._shouldSpeakAnnouncement(
+						runtime,
+						announcement,
+						resolvedObject,
+						event=event,
+					)
 				):
 					runtime.speaker.speak(announcement)
 		return True
@@ -362,19 +369,31 @@ class LinuxPlatform(SystemPlatform):
 		runtime: LinuxCoreRuntime,
 		announcement: str,
 		resolvedObject,
-		*,
+		event,
 		dedupWindowSeconds: float = 0.2,
+		sameObjectBurstWindowSeconds: float = 0.45,
 	) -> bool:
+		now = time.monotonic()
+		sourceAccessible = getattr(event, "sourceAccessible", None)
+		sourceKey = hash(sourceAccessible) if sourceAccessible is not None else None
+		if (
+			sourceKey is not None
+			and sourceKey == runtime.lastPresentedSourceKey
+			and now - runtime.lastPresentedSourceTime <= sameObjectBurstWindowSeconds
+			and not event.eventType.startswith("object:property-change:accessible-name")
+		):
+			return False
 		announcementKey = (
 			announcement,
 			resolvedObject.applicationName,
 		)
-		now = time.monotonic()
 		if (
 			announcementKey == runtime.lastAnnouncementKey
 			and now - runtime.lastAnnouncementTime <= dedupWindowSeconds
 		):
 			return False
+		runtime.lastPresentedSourceKey = sourceKey
+		runtime.lastPresentedSourceTime = now
 		runtime.lastAnnouncementKey = announcementKey
 		runtime.lastAnnouncementTime = now
 		return True

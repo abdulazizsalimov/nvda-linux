@@ -46,13 +46,6 @@ def _sanitizeUtterance(text: str) -> str:
 def _callAccessibleStringMethod(accessible, methodName: str) -> str | None:
 	if accessible is None:
 		return None
-	Atspi = importAtspi()
-	staticMethod = getattr(Atspi.Accessible, methodName, None)
-	if callable(staticMethod):
-		try:
-			return _sanitizeUtterance(staticMethod(accessible) or "") or None
-		except Exception:
-			pass
 	method = getattr(accessible, methodName, None)
 	if not callable(method):
 		return None
@@ -75,21 +68,13 @@ def _getAccessibleDescription(accessible) -> str | None:
 def _getAccessibleTextContent(accessible) -> str | None:
 	if accessible is None:
 		return None
-	Atspi = importAtspi()
 	textIface = None
-	getTextIface = getattr(Atspi.Accessible, "get_text_iface", None)
+	getTextIface = getattr(accessible, "get_text_iface", None)
 	if callable(getTextIface):
 		try:
-			textIface = getTextIface(accessible)
+			textIface = getTextIface()
 		except Exception:
 			textIface = None
-	if textIface is None:
-		getTextIface = getattr(accessible, "get_text_iface", None)
-		if callable(getTextIface):
-			try:
-				textIface = getTextIface()
-			except Exception:
-				textIface = None
 	if textIface is None:
 		isText = getattr(accessible, "is_text", None)
 		try:
@@ -99,22 +84,6 @@ def _getAccessibleTextContent(accessible) -> str | None:
 			textIface = None
 	if textIface is None:
 		return None
-	getCharacterCount = getattr(Atspi.Text, "get_character_count", None)
-	getText = getattr(Atspi.Text, "get_text", None)
-	if callable(getCharacterCount) and callable(getText):
-		try:
-			characterCount = int(getCharacterCount(textIface) or 0)
-		except Exception:
-			characterCount = 0
-		if characterCount <= 0:
-			return None
-		try:
-			return _sanitizeUtterance(getText(textIface, 0, characterCount) or "") or None
-		except Exception:
-			try:
-				return _sanitizeUtterance(getText(textIface, 0, -1) or "") or None
-			except Exception:
-				return None
 	getCharacterCount = getattr(textIface, "get_character_count", None)
 	getText = getattr(textIface, "get_text", None)
 	if not callable(getCharacterCount) or not callable(getText):
@@ -137,13 +106,6 @@ def _getAccessibleTextContent(accessible) -> str | None:
 def _getAccessibleRoleEnum(accessible):
 	if accessible is None:
 		return None
-	Atspi = importAtspi()
-	getRole = getattr(Atspi.Accessible, "get_role", None)
-	if callable(getRole):
-		try:
-			return getRole(accessible)
-		except Exception:
-			pass
 	try:
 		return accessible.get_role()
 	except Exception:
@@ -153,13 +115,6 @@ def _getAccessibleRoleEnum(accessible):
 def _getAccessibleChild(accessible, index: int):
 	if accessible is None:
 		return None
-	Atspi = importAtspi()
-	getChildAtIndex = getattr(Atspi.Accessible, "get_child_at_index", None)
-	if callable(getChildAtIndex):
-		try:
-			return getChildAtIndex(accessible, index)
-		except Exception:
-			pass
 	try:
 		return accessible.get_child_at_index(index)
 	except Exception:
@@ -169,13 +124,6 @@ def _getAccessibleChild(accessible, index: int):
 def _getAccessibleChildCount(accessible) -> int:
 	if accessible is None:
 		return 0
-	Atspi = importAtspi()
-	getChildCount = getattr(Atspi.Accessible, "get_child_count", None)
-	if callable(getChildCount):
-		try:
-			return int(getChildCount(accessible) or 0)
-		except Exception:
-			pass
 	try:
 		return int(accessible.get_child_count() or 0)
 	except Exception:
@@ -432,6 +380,26 @@ def _getPresentableDescendantNames(accessible, *, maxParts: int = 3) -> tuple[st
 	return tuple((*primaryCandidates, *fallbackCandidates)[:maxParts])
 
 
+def _shouldUseDescendantNameTraversal(roleEnum, childCount: int) -> bool:
+	if roleEnum is None or childCount <= 0:
+		return False
+	Atspi = importAtspi()
+	return roleEnum in {
+		Atspi.Role.CHECK_MENU_ITEM,
+		Atspi.Role.LABEL,
+		Atspi.Role.MENU,
+		Atspi.Role.MENU_ITEM,
+		Atspi.Role.PANEL,
+		Atspi.Role.POPUP_MENU,
+		Atspi.Role.PUSH_BUTTON,
+		Atspi.Role.PUSH_BUTTON_MENU,
+		Atspi.Role.RADIO_MENU_ITEM,
+		Atspi.Role.STATIC,
+		Atspi.Role.TEXT,
+		Atspi.Role.TOGGLE_BUTTON,
+	}
+
+
 def _getAccessibleLabelAndName(
 	accessible,
 	*,
@@ -453,9 +421,10 @@ def _getAccessibleLabelAndName(
 		return (label,)
 	if name:
 		return (name,)
-	descendantNames = _getPresentableDescendantNames(accessible)
-	if descendantNames:
-		return descendantNames
+	if _shouldUseDescendantNameTraversal(roleEnum, childCount):
+		descendantNames = _getPresentableDescendantNames(accessible)
+		if descendantNames:
+			return descendantNames
 	description = _getAccessibleDescription(accessible)
 	menuRoles = {
 		importAtspi().Role.CHECK_MENU_ITEM,
