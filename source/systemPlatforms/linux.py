@@ -19,19 +19,14 @@ from linux.accessibility import (
 	clearAccessibleCache,
 	describeObjectSnapshot,
 	describeAccessibleNameSources,
-	getAccessibleAttributeValue,
 	replaceObjectSnapshotName,
 	resolveAccessibleObjectSnapshot,
 	snapshotDesktop,
 )
-from linux.gtkMenus import (
-	describeExportedGtkMenus,
-	getExportedGtkMenuSnapshot,
-	matchExportedGtkMenuItem,
-)
 from linux.presentation import (
 	LinuxDefaultScript,
 	LinuxFocusManager,
+	LinuxGtkScript,
 	LinuxPresentationManager,
 	LinuxSpeechGenerator,
 )
@@ -220,7 +215,7 @@ class LinuxPlatform(SystemPlatform):
 			focusManager=runtime.focusManager,
 			speechGenerator=runtime.speechGenerator,
 		)
-		runtime.defaultScript = LinuxDefaultScript(
+		runtime.defaultScript = LinuxGtkScript(
 			focusManager=runtime.focusManager,
 			presentationManager=runtime.presentationManager,
 		)
@@ -452,13 +447,6 @@ class LinuxPlatform(SystemPlatform):
 				describeObjectSnapshot(resolvedObject),
 			)
 			return resolvedObject
-		gtkMenuResolvedObject = self._resolveFromExportedGtkMenus(
-			event=event,
-			resolvedObject=resolvedObject,
-			log=log,
-		)
-		if gtkMenuResolvedObject is not None:
-			return gtkMenuResolvedObject
 		if resolvedObject.name is None and resolvedObject.childCount > 0:
 			log.info(
 				"Linux AT-SPI object still nameless after raw resolution; "
@@ -474,49 +462,6 @@ class LinuxPlatform(SystemPlatform):
 				log.debug("Failed to describe late AT-SPI name sources", exc_info=True)
 		return resolvedObject
 
-	def _resolveFromExportedGtkMenus(
-		self,
-		*,
-		event,
-		resolvedObject,
-		log: Any,
-	):
-		if resolvedObject.name:
-			return resolvedObject
-		appId = resolvedObject.applicationName
-		if not appId or "." not in appId:
-			return None
-		keyshortcuts = getAccessibleAttributeValue(event.sourceAccessible, "keyshortcuts")
-		if not keyshortcuts:
-			return None
-		try:
-			menuMatch = matchExportedGtkMenuItem(
-				appId,
-				keyshortcuts=keyshortcuts,
-				hasSubmenu=bool("HASPOPUP" in resolvedObject.stateNames),
-			)
-		except Exception:
-			log.debug("Failed to query exported GTK menus for %s", appId, exc_info=True)
-			return None
-		if menuMatch is None:
-			try:
-				log.info(
-					"Linux GTK menu export snapshot: app=%s shortcut=%r %s",
-					appId,
-					keyshortcuts,
-					describeExportedGtkMenus(getExportedGtkMenuSnapshot(appId)),
-				)
-			except Exception:
-				log.debug("Failed to describe exported GTK menus for %s", appId, exc_info=True)
-			return None
-		log.info(
-			"Linux GTK menu-resolved focus: app=%s shortcut=%r label=%r path=%s",
-			appId,
-			keyshortcuts,
-			menuMatch.label,
-			menuMatch.path,
-		)
-		return replaceObjectSnapshotName(resolvedObject, menuMatch.label)
 
 	def _pumpLateResolutionMainContext(self, glibMainContext: Any | None, log: Any) -> None:
 		if glibMainContext is None:

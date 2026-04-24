@@ -9,7 +9,15 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from linux import speech as speechHelpers
-from linux.accessibility import snapshotAccessibleObject
+from linux.accessibility import (
+	_getAccessibleChildCount,
+	_getAccessibleParent,
+	_getAccessibleRoleEnum,
+	_getFocusedState,
+	_getSelectedAccessibleChild,
+	clearAccessibleCache,
+	snapshotAccessibleObject,
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +42,13 @@ class LinuxFocusManager:
 		self._priorFocus: object | None = None
 		self._focusSnapshot: object | None = None
 		self._priorFocusSnapshot: object | None = None
+		self._notifyCallback: Callable[[Any, object | None, object | None], None] | None = None
+
+	def set_notify_callback(
+		self,
+		callback: Callable[[Any, object | None, object | None], None],
+	) -> None:
+		self._notifyCallback = callback
 
 	def get_locus_of_focus(self) -> object | None:
 		return self._locusOfFocus
@@ -52,17 +67,138 @@ class LinuxFocusManager:
 		event: Any,
 		obj: object | None,
 		*,
+		notify_script: bool = True,
+		force: bool = False,
 		snapshot: object | None = None,
 	) -> None:
-		del event
-		if obj is self._locusOfFocus:
+		clearAccessibleCache(obj)
+		if not force and obj is self._locusOfFocus:
 			if snapshot is not None:
 				self._focusSnapshot = snapshot
 			return
-		self._priorFocus = self._locusOfFocus
+		oldFocus = self._locusOfFocus
+		self._priorFocus = oldFocus
 		self._priorFocusSnapshot = self._focusSnapshot
 		self._locusOfFocus = obj
 		self._focusSnapshot = snapshot
+		if notify_script and self._notifyCallback is not None:
+			self._notifyCallback(event, oldFocus, self._locusOfFocus)
+
+
+class LinuxAXUtilities:
+	@staticmethod
+	def is_focused(obj: object | None) -> bool:
+		return _getFocusedState(obj)
+
+	@staticmethod
+	def is_ancestor(ancestor: object | None, obj: object | None) -> bool:
+		current = obj
+		while current is not None:
+			if current is ancestor:
+				return True
+			current = _getAccessibleParent(current)
+		return False
+
+	@staticmethod
+	def selected_children(obj: object | None) -> list[object]:
+		child = _getSelectedAccessibleChild(obj)
+		return [child] if child is not None else []
+
+	@staticmethod
+	def selected_child_count(obj: object | None) -> int:
+		return len(LinuxAXUtilities.selected_children(obj))
+
+	@staticmethod
+	def get_selected_child_for_focus(
+		obj: object | None,
+		focus: object | None,
+		should_skip: Callable[[object], bool] | None = None,
+	) -> object | None:
+		selected = LinuxAXUtilities.selected_children(obj)
+		if focus in selected:
+			return None
+		for child in selected:
+			if should_skip is not None and should_skip(child):
+				continue
+			if LinuxAXUtilities.is_ancestor(focus, child):
+				return None
+			return child
+		return None
+
+	@staticmethod
+	def is_table_cell(obj: object | None) -> bool:
+		Atspi = speechHelpers.importAtspi()
+		return _getAccessibleRoleEnum(obj) == Atspi.Role.TABLE_CELL
+
+	@staticmethod
+	def is_table_related(obj: object | None) -> bool:
+		Atspi = speechHelpers.importAtspi()
+		return _getAccessibleRoleEnum(obj) in {
+			Atspi.Role.TABLE,
+			Atspi.Role.TABLE_CELL,
+			Atspi.Role.TABLE_ROW,
+			Atspi.Role.TABLE_COLUMN_HEADER,
+			Atspi.Role.TABLE_ROW_HEADER,
+			Atspi.Role.TREE_TABLE,
+		}
+
+	@staticmethod
+	def is_tree_or_tree_table(obj: object | None) -> bool:
+		Atspi = speechHelpers.importAtspi()
+		return _getAccessibleRoleEnum(obj) in {Atspi.Role.TREE, Atspi.Role.TREE_TABLE}
+
+	@staticmethod
+	def find_ancestor(
+		obj: object | None,
+		predicate: Callable[[object | None], bool],
+	) -> object | None:
+		current = _getAccessibleParent(obj)
+		while current is not None:
+			if predicate(current):
+				return current
+			current = _getAccessibleParent(current)
+		return None
+
+	@staticmethod
+	def is_toggle_button(obj: object | None) -> bool:
+		Atspi = speechHelpers.importAtspi()
+		return _getAccessibleRoleEnum(obj) == Atspi.Role.TOGGLE_BUTTON
+
+	@staticmethod
+	def is_combo_box(obj: object | None) -> bool:
+		Atspi = speechHelpers.importAtspi()
+		return _getAccessibleRoleEnum(obj) == Atspi.Role.COMBO_BOX
+
+	@staticmethod
+	def is_layered_pane(obj: object | None) -> bool:
+		Atspi = speechHelpers.importAtspi()
+		return _getAccessibleRoleEnum(obj) == Atspi.Role.LAYERED_PANE
+
+	@staticmethod
+	def is_window(obj: object | None) -> bool:
+		Atspi = speechHelpers.importAtspi()
+		return _getAccessibleRoleEnum(obj) == Atspi.Role.WINDOW
+
+	@staticmethod
+	def is_icon_or_canvas(obj: object | None) -> bool:
+		Atspi = speechHelpers.importAtspi()
+		return _getAccessibleRoleEnum(obj) in {Atspi.Role.ICON, Atspi.Role.CANVAS}
+
+	@staticmethod
+	def is_menu_bar(obj: object | None) -> bool:
+		Atspi = speechHelpers.importAtspi()
+		return _getAccessibleRoleEnum(obj) == Atspi.Role.MENU_BAR
+
+	@staticmethod
+	def get_active_descendant_checked(
+		container: object | None,
+		reportedChild: object | None,
+	) -> object | None:
+		if reportedChild is None:
+			return None
+		if _getAccessibleParent(reportedChild) is container:
+			return reportedChild
+		return reportedChild
 
 
 class LinuxSpeechGenerator:
@@ -391,18 +527,20 @@ class LinuxPresentationManager:
 
 	def present_object(
 		self,
+		script,
 		obj: object | None,
 		*,
 		snapshot: object | None = None,
 		nameOverride: str | None = None,
 		interrupt: bool = True,
 		alreadyFocused: bool = False,
+		priorObj: object | None = None,
 	) -> LinuxPresentationResult | None:
 		if obj is None:
 			return None
 		context = LinuxGeneratorContext(
 			focus=self._focusManager.get_locus_of_focus(),
-			priorFocus=self._focusManager.get_prior_focus(),
+			priorFocus=priorObj if priorObj is not None else self._focusManager.get_prior_focus(),
 			alreadyFocused=alreadyFocused,
 			interrupt=interrupt,
 		)
@@ -431,6 +569,26 @@ class LinuxDefaultScript:
 	) -> None:
 		self._focusManager = focusManager
 		self._presentationManager = presentationManager
+		self._focusManager.set_notify_callback(self.locus_of_focus_changed)
+
+	def locus_of_focus_changed(
+		self,
+		event: Any,
+		old_focus: object | None,
+		new_focus: object | None,
+	) -> None:
+		if new_focus is None:
+			return
+		if old_focus is new_focus and not (
+			event is not None
+			and getattr(event, "eventType", "").startswith("object:property-change:accessible-name")
+		):
+			return
+		self.present_object(
+			new_focus,
+			priorObj=old_focus,
+			interrupt=True,
+		)
 
 	def handle_event(
 		self,
@@ -461,13 +619,16 @@ class LinuxDefaultScript:
 		nameOverride: str | None = None,
 		interrupt: bool = True,
 		alreadyFocused: bool = False,
+		priorObj: object | None = None,
 	) -> LinuxPresentationResult | None:
 		return self._presentationManager.present_object(
+			self,
 			obj,
 			snapshot=snapshot,
 			nameOverride=nameOverride,
 			interrupt=interrupt,
 			alreadyFocused=alreadyFocused,
+			priorObj=priorObj,
 		)
 
 	def _on_focused_changed(
@@ -476,13 +637,23 @@ class LinuxDefaultScript:
 		*,
 		resolveSnapshot: Callable[[Any], object | None],
 	) -> LinuxPresentationResult | None:
+		if not bool(getattr(event, "detail1", 0)):
+			return None
+		if not LinuxAXUtilities.is_focused(event.eventSourceAccessible):
+			clearAccessibleCache(event.eventSourceAccessible)
+			if not LinuxAXUtilities.is_focused(event.eventSourceAccessible):
+				return None
 		snapshot = resolveSnapshot(event)
-		self._focusManager.set_locus_of_focus(event, event.sourceAccessible, snapshot=snapshot)
-		return self.present_object(
-			event.sourceAccessible,
-			snapshot=snapshot,
-			interrupt=True,
-		)
+		obj = event.sourceAccessible
+		if obj is None:
+			return None
+		if _getAccessibleChildCount(obj) and not LinuxAXUtilities.is_combo_box(obj):
+			selectedChildren = LinuxAXUtilities.selected_children(obj)
+			if selectedChildren:
+				obj = selectedChildren[0]
+				snapshot = snapshotAccessibleObject(obj)
+		self._focusManager.set_locus_of_focus(event, obj, snapshot=snapshot)
+		return None
 
 	def _on_active_descendant_changed(
 		self,
@@ -490,13 +661,11 @@ class LinuxDefaultScript:
 		*,
 		resolveSnapshot: Callable[[Any], object | None],
 	) -> LinuxPresentationResult | None:
+		if not event.shouldAnnounce:
+			return None
 		snapshot = resolveSnapshot(event)
 		self._focusManager.set_locus_of_focus(event, event.sourceAccessible, snapshot=snapshot)
-		return self.present_object(
-			event.sourceAccessible,
-			snapshot=snapshot,
-			interrupt=True,
-		)
+		return None
 
 	def _on_selection_changed(
 		self,
@@ -504,13 +673,20 @@ class LinuxDefaultScript:
 		*,
 		resolveSnapshot: Callable[[Any], object | None],
 	) -> LinuxPresentationResult | None:
-		snapshot = resolveSnapshot(event)
-		self._focusManager.set_locus_of_focus(event, event.sourceAccessible, snapshot=snapshot)
-		return self.present_object(
-			event.sourceAccessible,
-			snapshot=snapshot,
-			interrupt=True,
+		del resolveSnapshot
+		focus = self._focusManager.get_locus_of_focus()
+		child = LinuxAXUtilities.get_selected_child_for_focus(
+			event.eventSourceAccessible,
+			focus,
 		)
+		if child is None:
+			return None
+		self._focusManager.set_locus_of_focus(
+			event,
+			child,
+			snapshot=snapshotAccessibleObject(child),
+		)
+		return None
 
 	def _on_selected_changed(
 		self,
@@ -518,14 +694,8 @@ class LinuxDefaultScript:
 		*,
 		resolveSnapshot: Callable[[Any], object | None],
 	) -> LinuxPresentationResult | None:
-		snapshot = resolveSnapshot(event)
-		self._focusManager.set_locus_of_focus(event, event.sourceAccessible, snapshot=snapshot)
-		return self.present_object(
-			event.sourceAccessible,
-			snapshot=snapshot,
-			interrupt=True,
-			alreadyFocused=True,
-		)
+		del resolveSnapshot
+		return None
 
 	def _on_name_changed(
 		self,
@@ -537,11 +707,123 @@ class LinuxDefaultScript:
 		if focus is not event.sourceAccessible and not bool(event.sourceObject and event.sourceObject.focused):
 			return None
 		snapshot = resolveSnapshot(event)
-		self._focusManager.set_locus_of_focus(event, event.sourceAccessible, snapshot=snapshot)
-		return self.present_object(
+		self._focusManager.set_locus_of_focus(
+			event,
 			event.sourceAccessible,
+			force=True,
 			snapshot=snapshot,
-			nameOverride=event.nameOverride,
-			interrupt=True,
-			alreadyFocused=True,
 		)
+		return None
+
+
+class LinuxGtkScript(LinuxDefaultScript):
+	def locus_of_focus_changed(
+		self,
+		event: Any,
+		old_focus: object | None,
+		new_focus: object | None,
+	) -> None:
+		if LinuxAXUtilities.is_toggle_button(new_focus):
+			new_focus = (
+				LinuxAXUtilities.find_ancestor(new_focus, LinuxAXUtilities.is_combo_box)
+				or new_focus
+			)
+			self._focusManager.set_locus_of_focus(
+				event,
+				new_focus,
+				notify_script=False,
+				force=True,
+				snapshot=snapshotAccessibleObject(new_focus),
+			)
+		super().locus_of_focus_changed(event, old_focus, new_focus)
+
+	def _on_active_descendant_changed(
+		self,
+		event,
+		*,
+		resolveSnapshot: Callable[[Any], object | None],
+	) -> LinuxPresentationResult | None:
+		if LinuxAXUtilities.is_table_related(event.eventSourceAccessible):
+			clearAccessibleCache(event.sourceAccessible)
+			clearAccessibleCache(event.eventSourceAccessible)
+		focus = self._focusManager.get_locus_of_focus()
+		if LinuxAXUtilities.is_table_cell(focus):
+			table = LinuxAXUtilities.find_ancestor(focus, LinuxAXUtilities.is_tree_or_tree_table)
+			if table is not None and table is not event.eventSourceAccessible:
+				return None
+		child = LinuxAXUtilities.get_active_descendant_checked(
+			event.eventSourceAccessible,
+			event.sourceAccessible,
+		)
+		if child is not None and child is not event.sourceAccessible:
+			self._focusManager.set_locus_of_focus(
+				event,
+				child,
+				snapshot=snapshotAccessibleObject(child),
+			)
+			return None
+		return super()._on_active_descendant_changed(event, resolveSnapshot=resolveSnapshot)
+
+	def _on_focused_changed(
+		self,
+		event,
+		*,
+		resolveSnapshot: Callable[[Any], object | None],
+	) -> LinuxPresentationResult | None:
+		focus = self._focusManager.get_locus_of_focus()
+		if LinuxAXUtilities.is_ancestor(focus, event.eventSourceAccessible) and LinuxAXUtilities.is_focused(focus):
+			return None
+		return super()._on_focused_changed(event, resolveSnapshot=resolveSnapshot)
+
+	def _on_selection_changed(
+		self,
+		event,
+		*,
+		resolveSnapshot: Callable[[Any], object | None],
+	) -> LinuxPresentationResult | None:
+		focus = self._focusManager.get_locus_of_focus()
+		if (
+			LinuxAXUtilities.is_toggle_button(focus)
+			and LinuxAXUtilities.is_combo_box(event.eventSourceAccessible)
+			and LinuxAXUtilities.is_ancestor(focus, event.eventSourceAccessible)
+		):
+			return super()._on_selection_changed(event, resolveSnapshot=resolveSnapshot)
+		if LinuxAXUtilities.is_combo_box(event.eventSourceAccessible) and not LinuxAXUtilities.is_focused(
+			event.eventSourceAccessible,
+		):
+			return None
+		if (
+			LinuxAXUtilities.is_layered_pane(event.eventSourceAccessible)
+			and LinuxAXUtilities.selected_child_count(event.eventSourceAccessible) > 1
+		):
+			return None
+		return super()._on_selection_changed(event, resolveSnapshot=resolveSnapshot)
+
+	def _on_selected_changed(
+		self,
+		event,
+		*,
+		resolveSnapshot: Callable[[Any], object | None],
+	) -> LinuxPresentationResult | None:
+		del resolveSnapshot
+		if (
+			LinuxAXUtilities.is_table_cell(event.eventSourceAccessible)
+			and LinuxAXUtilities.find_ancestor(event.eventSourceAccessible, LinuxAXUtilities.is_window)
+			is not None
+		):
+			if bool(getattr(event, "detail1", 0)):
+				self._focusManager.set_locus_of_focus(
+					event,
+					event.eventSourceAccessible,
+					snapshot=snapshotAccessibleObject(event.eventSourceAccessible),
+				)
+				return None
+			if self._focusManager.get_locus_of_focus() is event.eventSourceAccessible:
+				self._focusManager.set_locus_of_focus(
+					event,
+					None,
+					notify_script=False,
+					force=True,
+				)
+				return None
+		return super()._on_selected_changed(event, resolveSnapshot=resolveSnapshot)

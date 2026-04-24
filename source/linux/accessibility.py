@@ -59,6 +59,7 @@ class FocusEventSnapshot:
 	hostApplicationName: str | None
 	sourceObject: AtspiObjectSnapshot | None = None
 	sourceAccessible: object | None = None
+	eventSourceAccessible: object | None = None
 	debugNameSources: str | None = None
 
 
@@ -1270,7 +1271,8 @@ def snapshotDesktop(*, maxApplications: int = 10) -> DesktopSnapshot:
 
 def snapshotFocusEvent(event) -> FocusEventSnapshot:
 	eventType = getattr(event, "type", "") or ""
-	source = getattr(event, "source", None)
+	eventSource = getattr(event, "source", None)
+	source = eventSource
 	eventLabel = eventType or "event"
 	shouldAnnounce = False
 	nameOverride = None
@@ -1298,7 +1300,7 @@ def snapshotFocusEvent(event) -> FocusEventSnapshot:
 	elif eventType.startswith("object:attributes-changed"):
 		eventLabel = "attributes-changed"
 		target = source
-	source = _normalizePresentationAccessible(target)
+	source = target
 	try:
 		sourceObject = snapshotAccessibleObject(source) if source is not None else None
 	except Exception:
@@ -1325,5 +1327,6 @@ def snapshotFocusEvent(event) -> FocusEventSnapshot:
 		hostApplicationName=_getHostApplicationName(source),
 		sourceObject=sourceObject,
 		sourceAccessible=source,
+		eventSourceAccessible=eventSource,
 		debugNameSources=debugNameSources,
 	)
