@@ -307,19 +307,150 @@ def _getAccessibleStateSet(accessible):
 		return None
 
 
+def _getAccessibleRoleEnum(accessible):
+	if accessible is None:
+		return None
+	try:
+		return accessible.get_role()
+	except Exception:
+		return None
+
+
 def _getFocusedState(accessible) -> bool:
 	Atspi = importAtspi()
 	stateSet = _getAccessibleStateSet(accessible)
 	return bool(stateSet and stateSet.contains(Atspi.StateType.FOCUSED))
 
 
-def _getAccessibleName(accessible) -> str | None:
+def _normalizeAccessibleName(name: str | None) -> str | None:
+	if not name:
+		return None
+	name = " ".join(str(name).split())
+	return name or None
+
+
+def _getAccessibleSelfName(accessible) -> str | None:
 	if accessible is None:
 		return None
 	try:
-		return accessible.get_name()
+		return _normalizeAccessibleName(accessible.get_name())
 	except Exception:
 		return None
+
+
+def _getAccessibleChild(accessible, index: int):
+	if accessible is None:
+		return None
+	try:
+		return accessible.get_child_at_index(index)
+	except Exception:
+		return None
+
+
+def _iterAccessibleDescendants(
+	accessible,
+	*,
+	maxDepth: int = 3,
+	maxNodes: int = 32,
+	maxChildrenPerNode: int = 16,
+):
+	if accessible is None or maxDepth <= 0 or maxNodes <= 0:
+		return
+	pending: deque[tuple[object, int]] = deque([(accessible, 0)])
+	visited = 0
+	while pending and visited < maxNodes:
+		node, depth = pending.popleft()
+		if depth >= maxDepth:
+			continue
+		childCount = min(_getAccessibleChildCount(node), maxChildrenPerNode)
+		for childIndex in range(childCount):
+			child = _getAccessibleChild(node, childIndex)
+			if child is None:
+				continue
+			visited += 1
+			yield child
+			if visited >= maxNodes:
+				return
+			pending.append((child, depth + 1))
+
+
+def _shouldUseDescendantNameFallback(
+	name: str | None,
+	*,
+	roleEnum,
+	applicationName: str | None,
+) -> bool:
+	if not name:
+		return True
+	if roleEnum is None:
+		return False
+	Atspi = importAtspi()
+	menuLikeRoles = {
+		Atspi.Role.CHECK_MENU_ITEM,
+		Atspi.Role.MENU,
+		Atspi.Role.MENU_ITEM,
+		Atspi.Role.POPUP_MENU,
+		Atspi.Role.RADIO_MENU_ITEM,
+		Atspi.Role.TEAROFF_MENU_ITEM,
+	}
+	if roleEnum not in menuLikeRoles:
+		return False
+	if applicationName and name.casefold() == applicationName.casefold():
+		return True
+	return name.startswith("org.") or name.endswith(".desktop")
+
+
+def _getDescendantAccessibleName(
+	accessible,
+	*,
+	applicationName: str | None,
+) -> str | None:
+	Atspi = importAtspi()
+	primaryRoles = {
+		Atspi.Role.LABEL,
+		Atspi.Role.PARAGRAPH,
+		Atspi.Role.STATIC,
+		Atspi.Role.TEXT,
+	}
+	secondaryRoles = {
+		Atspi.Role.ACCELERATOR_LABEL,
+	}
+	fallbackName: str | None = None
+	secondaryFallbackName: str | None = None
+	for descendant in _iterAccessibleDescendants(accessible):
+		descendantName = _getAccessibleSelfName(descendant)
+		if not descendantName:
+			continue
+		if applicationName and descendantName.casefold() == applicationName.casefold():
+			continue
+		descendantRole = _getAccessibleRoleEnum(descendant)
+		if descendantRole in primaryRoles:
+			return descendantName
+		if descendantRole in secondaryRoles and secondaryFallbackName is None:
+			secondaryFallbackName = descendantName
+			continue
+		if fallbackName is None:
+			fallbackName = descendantName
+	return fallbackName or secondaryFallbackName
+
+
+def _getAccessibleName(accessible) -> str | None:
+	if accessible is None:
+		return None
+	name = _getAccessibleSelfName(accessible)
+	roleEnum = _getAccessibleRoleEnum(accessible)
+	applicationName = _getHostApplicationName(accessible)
+	if not _shouldUseDescendantNameFallback(
+		name,
+		roleEnum=roleEnum,
+		applicationName=applicationName,
+	):
+		return name
+	descendantName = _getDescendantAccessibleName(
+		accessible,
+		applicationName=applicationName,
+	)
+	return descendantName or name
 
 
 def _getAccessibleRole(accessible) -> str | None:
@@ -338,7 +469,7 @@ def _getHostApplicationName(accessible) -> str | None:
 		app = accessible.get_application()
 	except Exception:
 		return None
-	return _getAccessibleName(app)
+	return _getAccessibleSelfName(app)
 
 
 def _normalizeRole(accessible, stateSet):
@@ -346,8 +477,9 @@ def _normalizeRole(accessible, stateSet):
 	controlTypes = _getControlTypes()
 	if accessible is None:
 		return controlTypes.Role.UNKNOWN
-	role = _getAtspiRoleMap().get(accessible.get_role(), controlTypes.Role.UNKNOWN)
-	if accessible.get_role() == Atspi.Role.TEXT:
+	roleEnum = _getAccessibleRoleEnum(accessible)
+	role = _getAtspiRoleMap().get(roleEnum, controlTypes.Role.UNKNOWN)
+	if roleEnum == Atspi.Role.TEXT:
 		if stateSet and stateSet.contains(Atspi.StateType.EDITABLE):
 			return controlTypes.Role.EDITABLETEXT
 		return controlTypes.Role.STATICTEXT
