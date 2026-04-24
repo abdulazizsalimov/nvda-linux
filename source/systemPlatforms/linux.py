@@ -30,7 +30,6 @@ from linux.presentation import (
 	LinuxPresentationManager,
 	LinuxSpeechGenerator,
 )
-from linux.speech import EspeakSpeaker
 from linux.atspi import probeAtspiSupport
 from .base import SystemPlatform
 
@@ -53,7 +52,7 @@ class LinuxCoreRuntime:
 	glibMainContext: Any | None = None
 	pollIntervalSeconds: float = 0.05
 	interrupted: bool = False
-	speaker: EspeakSpeaker | None = None
+	synthDriverHandlerModule: Any | None = None
 	focusManager: LinuxFocusManager | None = None
 	speechGenerator: LinuxSpeechGenerator | None = None
 	presentationManager: LinuxPresentationManager | None = None
@@ -220,20 +219,27 @@ class LinuxPlatform(SystemPlatform):
 			presentationManager=runtime.presentationManager,
 		)
 		try:
-			speaker = EspeakSpeaker(log=log)
+			import speechDictHandler
+			import synthDriverHandler
 		except Exception:
-			log.debug("Failed to construct Linux espeak-ng speaker", exc_info=True)
+			log.debug("Failed to import NVDA synth driver handler on Linux", exc_info=True)
 		else:
-			if speaker.isAvailable:
-				try:
-					speaker.start()
-				except Exception:
-					log.debug("Failed to start Linux espeak-ng speaker", exc_info=True)
-				else:
-					runtime.speaker = speaker
-					log.info("Linux speech backend initialized with espeak-ng")
+			try:
+				speechDictHandler.initialize()
+				synthDriverHandler.initialize()
+				synthDriverHandler.setSynth("auto")
+			except Exception:
+				log.debug("Failed to initialize NVDA synth core on Linux", exc_info=True)
 			else:
-				log.info("Linux speech backend unavailable: espeak-ng was not found")
+				runtime.synthDriverHandlerModule = synthDriverHandler
+				currentSynth = synthDriverHandler.getSynth()
+				if currentSynth is not None:
+					log.info(
+						"Linux speech backend initialized via NVDA synth core: %s",
+						currentSynth.name,
+					)
+				else:
+					log.info("Linux speech backend initialized via NVDA synth core without an active synth")
 		return runtime
 
 	def run_headless_core_loop(self, runtime: object | None, log: Any) -> None:
@@ -242,8 +248,13 @@ class LinuxPlatform(SystemPlatform):
 		log.info(
 			"Linux headless runtime active; waiting for AT-SPI focus events. Press Ctrl+C to exit.",
 		)
-		if runtime.speaker is not None:
-			runtime.speaker.speak("NVDA Linux runtime active")
+		startupSpoken = self._speakAnnouncement(
+			runtime,
+			"NVDA Linux runtime active",
+			interrupt=True,
+			log=log,
+		)
+		log.info("Linux startup speech dispatch: spoken=%s", startupSpoken)
 		originalSigintHandler, originalSigtermHandler = self._installSignalHandlers(runtime, log)
 		try:
 			while not runtime.interrupted:
@@ -348,29 +359,30 @@ class LinuxPlatform(SystemPlatform):
 					)
 					lastPresentationResult = presentationResult
 					lastPresentationEvent = event
-		if (
-			lastPresentationResult is not None
-			and lastPresentationEvent is not None
-			and runtime.speaker is not None
-			and lastPresentationResult.snapshot is not None
-			and self._shouldSpeakAnnouncement(
-				runtime,
-				lastPresentationResult.announcement,
-				lastPresentationResult.snapshot,
-				event=lastPresentationEvent,
-				log=log,
-			)
-		):
-			spoken = runtime.speaker.speak(
-				lastPresentationResult.announcement,
-				interrupt=lastPresentationResult.interrupt,
-			)
-			log.info(
-				"Linux speech dispatch: spoken=%s text=%r",
-				spoken,
-				lastPresentationResult.announcement,
-			)
-		return True
+			if (
+				lastPresentationResult is not None
+				and lastPresentationEvent is not None
+				and lastPresentationResult.snapshot is not None
+				and self._shouldSpeakAnnouncement(
+					runtime,
+					lastPresentationResult.announcement,
+					lastPresentationResult.snapshot,
+					event=lastPresentationEvent,
+					log=log,
+				)
+			):
+				spoken = self._speakAnnouncement(
+					runtime,
+					lastPresentationResult.announcement,
+					interrupt=lastPresentationResult.interrupt,
+					log=log,
+				)
+				log.info(
+					"Linux speech dispatch: spoken=%s text=%r",
+					spoken,
+					lastPresentationResult.announcement,
+				)
+			return True
 
 	def _shouldSpeakAnnouncement(
 		self,
@@ -415,6 +427,33 @@ class LinuxPlatform(SystemPlatform):
 		runtime.lastPresentedSourceTime = now
 		runtime.lastAnnouncementKey = announcementKey
 		runtime.lastAnnouncementTime = now
+		return True
+
+	def _speakAnnouncement(
+		self,
+		runtime: LinuxCoreRuntime,
+		text: str,
+		*,
+		interrupt: bool,
+		log: Any,
+	) -> bool:
+		text = " ".join((text or "").split())
+		if not text:
+			return False
+		synthDriverHandler = runtime.synthDriverHandlerModule
+		if synthDriverHandler is None:
+			return False
+		synth = synthDriverHandler.getSynth()
+		if synth is None:
+			log.debug("Linux NVDA synth core has no active synth")
+			return False
+		try:
+			if interrupt:
+				synth.cancel()
+			synth.speak([text])
+		except Exception:
+			log.debug("Failed to speak announcement via NVDA synth core", exc_info=True)
+			return False
 		return True
 
 	def _resolvePresentationSnapshot(
@@ -508,8 +547,11 @@ class LinuxPlatform(SystemPlatform):
 		del terminate, log
 		if not isinstance(runtime, LinuxCoreRuntime):
 			return
-		if runtime.speaker is not None:
-			runtime.speaker.terminate()
+		if runtime.synthDriverHandlerModule is not None:
+			try:
+				runtime.synthDriverHandlerModule.setSynth(None)
+			except Exception:
+				log.debug("Failed to terminate NVDA synth core on Linux", exc_info=True)
 
 	def get_runtime_unsupported_message(self) -> str:
 		atspiProbe = probeAtspiSupport()

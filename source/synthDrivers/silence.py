@@ -5,7 +5,6 @@
 
 from collections import OrderedDict
 import synthDriverHandler
-from speech.commands import IndexCommand
 
 
 class SynthDriver(synthDriverHandler.SynthDriver):
@@ -13,7 +12,10 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
 	name = "silence"
 	# Translators: Description for a speech synthesizer.
-	description = _("No speech")
+	try:
+		description = _("No speech")
+	except NameError:
+		description = "No speech"
 
 	@classmethod
 	def check(cls):
@@ -25,7 +27,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 	def speak(self, speechSequence):
 		self.lastIndex = None
 		for item in speechSequence:
-			if isinstance(item, IndexCommand):
+			if hasattr(item, "index"):
 				self.lastIndex = item.index
 
 	def cancel(self):

@@ -7,6 +7,7 @@
 from collections import OrderedDict
 import pkgutil
 import importlib
+import sys
 from typing import (
 	TYPE_CHECKING,
 )
@@ -437,11 +438,21 @@ def changeVoice(synth, voice):
 	if voice:
 		synth.voice = voice
 	# start or update the synthSettingsRing
-	if globalVars.settingsRing:
-		globalVars.settingsRing.updateSupportedSettings(synth)
+	if sys.platform == "win32":
+		if globalVars.settingsRing:
+			globalVars.settingsRing.updateSupportedSettings(synth)
+		else:
+			globalVars.settingsRing = SynthSettingsRing(synth)
 	else:
-		globalVars.settingsRing = SynthSettingsRing(synth)
-	speechDictHandler.loadVoiceDict(synth)
+		try:
+			if globalVars.settingsRing:
+				globalVars.settingsRing.updateSupportedSettings(synth)
+		except Exception:
+			log.debug("Failed to update synth settings ring on non-Windows platform", exc_info=True)
+	try:
+		speechDictHandler.loadVoiceDict(synth)
+	except Exception:
+		log.debug("Failed to load voice dictionary for synth %s", synth.name, exc_info=True)
 
 
 def _getSynthDriver(name: str) -> type[SynthDriver]:
@@ -493,7 +504,10 @@ def getSynthInstance(name: str, asDefault: bool = False):
 
 # The synthDrivers that should be used by default.
 # The first that successfully initializes will be used when config is set to auto (I.e. new installs of NVDA).
-defaultSynthPriorityList = ["oneCore", "espeak", "silence"]
+if sys.platform == "win32":
+	defaultSynthPriorityList = ["oneCore", "espeak", "silence"]
+else:
+	defaultSynthPriorityList = ["linuxEspeakNg", "silence"]
 
 
 def setSynth(name: str | None, isFallback: bool = False, *, _leftToTry: list[str] | None = None) -> bool:

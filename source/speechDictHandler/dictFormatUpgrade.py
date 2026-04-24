@@ -9,10 +9,16 @@ import glob
 import os
 from typing import Any
 
-import api
 import globalVars
 from logHandler import log
 from NVDAState import WritePaths
+
+
+def _filterFileName(name: str) -> str:
+	invalidChars = r':?*\|<>/"'
+	for char in invalidChars:
+		name = name.replace(char, "_")
+	return name
 
 
 def __getattr__(attrName: str) -> Any:
@@ -54,7 +60,7 @@ def createVoiceDictFileName(synthName, voiceName):
 	fileNameFormat = "{synth}-{voice}.dic"
 	return fileNameFormat.format(
 		synth=synthName,
-		voice=api.filterFileName(voiceName),
+		voice=_filterFileName(voiceName),
 	)
 
 
