@@ -341,6 +341,11 @@ class LinuxPlatform(SystemPlatform):
 					),
 				)
 				if presentationResult is not None:
+					log.info(
+						"Linux presentation result: event=%s announcement=%r",
+						event.eventLabel,
+						presentationResult.announcement,
+					)
 					lastPresentationResult = presentationResult
 					lastPresentationEvent = event
 		if (
@@ -353,11 +358,17 @@ class LinuxPlatform(SystemPlatform):
 				lastPresentationResult.announcement,
 				lastPresentationResult.snapshot,
 				event=lastPresentationEvent,
+				log=log,
 			)
 		):
-			runtime.speaker.speak(
+			spoken = runtime.speaker.speak(
 				lastPresentationResult.announcement,
 				interrupt=lastPresentationResult.interrupt,
+			)
+			log.info(
+				"Linux speech dispatch: spoken=%s text=%r",
+				spoken,
+				lastPresentationResult.announcement,
 			)
 		return True
 
@@ -367,6 +378,7 @@ class LinuxPlatform(SystemPlatform):
 		announcement: str,
 		resolvedObject,
 		event,
+		log: Any,
 		dedupWindowSeconds: float = 0.2,
 		sameObjectBurstWindowSeconds: float = 0.45,
 	) -> bool:
@@ -379,6 +391,11 @@ class LinuxPlatform(SystemPlatform):
 			and now - runtime.lastPresentedSourceTime <= sameObjectBurstWindowSeconds
 			and not event.eventType.startswith("object:property-change:accessible-name")
 		):
+			log.debug(
+				"Suppressing Linux speech burst for source=%r event=%s",
+				sourceAccessible,
+				event.eventType,
+			)
 			return False
 		announcementKey = (
 			announcement,
@@ -388,6 +405,11 @@ class LinuxPlatform(SystemPlatform):
 			announcementKey == runtime.lastAnnouncementKey
 			and now - runtime.lastAnnouncementTime <= dedupWindowSeconds
 		):
+			log.debug(
+				"Suppressing duplicate Linux speech announcement=%r event=%s",
+				announcement,
+				event.eventType,
+			)
 			return False
 		runtime.lastPresentedSourceKey = sourceKey
 		runtime.lastPresentedSourceTime = now

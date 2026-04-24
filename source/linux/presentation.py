@@ -590,6 +590,8 @@ class LinuxDefaultScript:
 			return None
 		return self.present_object(
 			new_focus,
+			snapshot=self._focusManager.get_focus_snapshot(),
+			nameOverride=getattr(event, "nameOverride", None) if event is not None else None,
 			priorObj=old_focus,
 			interrupt=True,
 		)
