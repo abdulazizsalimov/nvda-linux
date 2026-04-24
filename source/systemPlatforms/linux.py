@@ -302,6 +302,8 @@ class LinuxPlatform(SystemPlatform):
 		pendingEvents = focusEventMonitor.drainPendingEvents()
 		if not pendingEvents:
 			return False
+		lastPresentationResult = None
+		lastPresentationEvent = None
 		for event in pendingEvents:
 			if event.eventType.startswith("object:attributes-changed") and event.sourceAccessible is not None:
 				try:
@@ -328,7 +330,6 @@ class LinuxPlatform(SystemPlatform):
 					event.eventLabel,
 					event.debugNameSources,
 				)
-			presentationResult = None
 			if event.shouldAnnounce and runtime.defaultScript is not None:
 				presentationResult = runtime.defaultScript.handle_event(
 					event,
@@ -339,21 +340,25 @@ class LinuxPlatform(SystemPlatform):
 						log=log,
 					),
 				)
-			if (
-				presentationResult is not None
-				and runtime.speaker is not None
-				and presentationResult.snapshot is not None
-				and self._shouldSpeakAnnouncement(
-					runtime,
-					presentationResult.announcement,
-					presentationResult.snapshot,
-					event=event,
-				)
-			):
-				runtime.speaker.speak(
-					presentationResult.announcement,
-					interrupt=presentationResult.interrupt,
-				)
+				if presentationResult is not None:
+					lastPresentationResult = presentationResult
+					lastPresentationEvent = event
+		if (
+			lastPresentationResult is not None
+			and lastPresentationEvent is not None
+			and runtime.speaker is not None
+			and lastPresentationResult.snapshot is not None
+			and self._shouldSpeakAnnouncement(
+				runtime,
+				lastPresentationResult.announcement,
+				lastPresentationResult.snapshot,
+				event=lastPresentationEvent,
+			)
+		):
+			runtime.speaker.speak(
+				lastPresentationResult.announcement,
+				interrupt=lastPresentationResult.interrupt,
+			)
 		return True
 
 	def _shouldSpeakAnnouncement(
