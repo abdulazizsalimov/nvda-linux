@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -476,6 +476,25 @@ def _getAccessibleAttributes(accessible) -> tuple[tuple[str, str], ...]:
 		if key and value:
 			parsedAttributes.append((key, value))
 	return tuple(parsedAttributes)
+
+
+def getAccessibleAttributes(accessible) -> tuple[tuple[str, str], ...]:
+	return _getAccessibleAttributes(accessible)
+
+
+def getAccessibleAttributeValue(accessible, attributeName: str) -> str | None:
+	attributeKey = attributeName.casefold()
+	for key, value in _getAccessibleAttributes(accessible):
+		if key.casefold() == attributeKey:
+			return value
+	return None
+
+
+def replaceObjectSnapshotName(
+	snapshot: AtspiObjectSnapshot,
+	name: str,
+) -> AtspiObjectSnapshot:
+	return replace(snapshot, name=_normalizeAccessibleName(name))
 
 
 def _iterAccessibleAttributeCandidates(
