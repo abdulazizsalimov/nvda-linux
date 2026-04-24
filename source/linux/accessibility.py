@@ -1012,6 +1012,7 @@ def resolveAccessibleObjectSnapshot(
 	*,
 	attempts: int = 5,
 	delaySeconds: float = 0.03,
+	settleCallback=None,
 	shouldContinue=None,
 ) -> AtspiObjectSnapshot | None:
 	if accessible is None:
@@ -1028,8 +1029,18 @@ def resolveAccessibleObjectSnapshot(
 		if callable(shouldContinue) and not shouldContinue():
 			break
 		_clearAccessibleCache(accessible)
+		if callable(settleCallback):
+			try:
+				settleCallback()
+			except Exception:
+				pass
 		if delaySeconds > 0:
 			time.sleep(delaySeconds)
+			if callable(settleCallback):
+				try:
+					settleCallback()
+				except Exception:
+					pass
 		try:
 			snapshot = snapshotAccessibleObject(accessible)
 		except Exception:

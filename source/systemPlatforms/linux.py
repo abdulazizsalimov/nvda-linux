@@ -300,6 +300,7 @@ class LinuxPlatform(SystemPlatform):
 					resolvedObject = self._lateResolveFocusedObject(
 						event=event,
 						focusEventMonitor=focusEventMonitor,
+						glibMainContext=runtime.glibMainContext,
 						log=log,
 					) or resolvedObject
 				announcement = buildFocusAnnouncement(resolvedObject)
@@ -312,6 +313,7 @@ class LinuxPlatform(SystemPlatform):
 		*,
 		event,
 		focusEventMonitor: AtspiFocusEventMonitor,
+		glibMainContext: Any | None,
 		log: Any,
 	):
 		sourceAccessible = event.sourceAccessible
@@ -319,8 +321,12 @@ class LinuxPlatform(SystemPlatform):
 			return event.sourceObject
 		resolvedObject = resolveAccessibleObjectSnapshot(
 			sourceAccessible,
-			attempts=6,
-			delaySeconds=0.03,
+			attempts=8,
+			delaySeconds=0.02,
+			settleCallback=lambda: self._pumpLateResolutionMainContext(
+				glibMainContext,
+				log,
+			),
 			shouldContinue=lambda: focusEventMonitor.latestFocusedAccessible is sourceAccessible,
 		)
 		if resolvedObject is None:
@@ -339,6 +345,15 @@ class LinuxPlatform(SystemPlatform):
 			except Exception:
 				log.debug("Failed to describe late AT-SPI name sources", exc_info=True)
 		return resolvedObject
+
+	def _pumpLateResolutionMainContext(self, glibMainContext: Any | None, log: Any) -> None:
+		if glibMainContext is None:
+			return
+		deadline = time.monotonic() + 0.03
+		while time.monotonic() < deadline:
+			hadActivity = self._pumpGlibMainContext(glibMainContext, log)
+			if not hadActivity:
+				time.sleep(0.005)
 
 	def terminate_core_runtime(
 		self,
