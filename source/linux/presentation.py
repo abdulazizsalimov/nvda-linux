@@ -42,11 +42,14 @@ class LinuxFocusManager:
 		self._priorFocus: object | None = None
 		self._focusSnapshot: object | None = None
 		self._priorFocusSnapshot: object | None = None
-		self._notifyCallback: Callable[[Any, object | None, object | None], None] | None = None
+		self._notifyCallback: Callable[
+			[Any, object | None, object | None],
+			"LinuxPresentationResult | None",
+		] | None = None
 
 	def set_notify_callback(
 		self,
-		callback: Callable[[Any, object | None, object | None], None],
+		callback: Callable[[Any, object | None, object | None], "LinuxPresentationResult | None"],
 	) -> None:
 		self._notifyCallback = callback
 
@@ -70,19 +73,20 @@ class LinuxFocusManager:
 		notify_script: bool = True,
 		force: bool = False,
 		snapshot: object | None = None,
-	) -> None:
+	) -> "LinuxPresentationResult | None":
 		clearAccessibleCache(obj)
 		if not force and obj is self._locusOfFocus:
 			if snapshot is not None:
 				self._focusSnapshot = snapshot
-			return
+			return None
 		oldFocus = self._locusOfFocus
 		self._priorFocus = oldFocus
 		self._priorFocusSnapshot = self._focusSnapshot
 		self._locusOfFocus = obj
 		self._focusSnapshot = snapshot
 		if notify_script and self._notifyCallback is not None:
-			self._notifyCallback(event, oldFocus, self._locusOfFocus)
+			return self._notifyCallback(event, oldFocus, self._locusOfFocus)
+		return None
 
 
 class LinuxAXUtilities:
@@ -576,15 +580,15 @@ class LinuxDefaultScript:
 		event: Any,
 		old_focus: object | None,
 		new_focus: object | None,
-	) -> None:
+	) -> LinuxPresentationResult | None:
 		if new_focus is None:
-			return
+			return None
 		if old_focus is new_focus and not (
 			event is not None
 			and getattr(event, "eventType", "").startswith("object:property-change:accessible-name")
 		):
-			return
-		self.present_object(
+			return None
+		return self.present_object(
 			new_focus,
 			priorObj=old_focus,
 			interrupt=True,
@@ -652,8 +656,7 @@ class LinuxDefaultScript:
 			if selectedChildren:
 				obj = selectedChildren[0]
 				snapshot = snapshotAccessibleObject(obj)
-		self._focusManager.set_locus_of_focus(event, obj, snapshot=snapshot)
-		return None
+		return self._focusManager.set_locus_of_focus(event, obj, snapshot=snapshot)
 
 	def _on_active_descendant_changed(
 		self,
@@ -664,8 +667,7 @@ class LinuxDefaultScript:
 		if not event.shouldAnnounce:
 			return None
 		snapshot = resolveSnapshot(event)
-		self._focusManager.set_locus_of_focus(event, event.sourceAccessible, snapshot=snapshot)
-		return None
+		return self._focusManager.set_locus_of_focus(event, event.sourceAccessible, snapshot=snapshot)
 
 	def _on_selection_changed(
 		self,
@@ -681,12 +683,11 @@ class LinuxDefaultScript:
 		)
 		if child is None:
 			return None
-		self._focusManager.set_locus_of_focus(
+		return self._focusManager.set_locus_of_focus(
 			event,
 			child,
 			snapshot=snapshotAccessibleObject(child),
 		)
-		return None
 
 	def _on_selected_changed(
 		self,
@@ -707,13 +708,12 @@ class LinuxDefaultScript:
 		if focus is not event.sourceAccessible and not bool(event.sourceObject and event.sourceObject.focused):
 			return None
 		snapshot = resolveSnapshot(event)
-		self._focusManager.set_locus_of_focus(
+		return self._focusManager.set_locus_of_focus(
 			event,
 			event.sourceAccessible,
 			force=True,
 			snapshot=snapshot,
 		)
-		return None
 
 
 class LinuxGtkScript(LinuxDefaultScript):
@@ -722,7 +722,7 @@ class LinuxGtkScript(LinuxDefaultScript):
 		event: Any,
 		old_focus: object | None,
 		new_focus: object | None,
-	) -> None:
+	) -> LinuxPresentationResult | None:
 		if LinuxAXUtilities.is_toggle_button(new_focus):
 			new_focus = (
 				LinuxAXUtilities.find_ancestor(new_focus, LinuxAXUtilities.is_combo_box)
@@ -735,7 +735,7 @@ class LinuxGtkScript(LinuxDefaultScript):
 				force=True,
 				snapshot=snapshotAccessibleObject(new_focus),
 			)
-		super().locus_of_focus_changed(event, old_focus, new_focus)
+		return super().locus_of_focus_changed(event, old_focus, new_focus)
 
 	def _on_active_descendant_changed(
 		self,
@@ -756,12 +756,11 @@ class LinuxGtkScript(LinuxDefaultScript):
 			event.sourceAccessible,
 		)
 		if child is not None and child is not event.sourceAccessible:
-			self._focusManager.set_locus_of_focus(
+			return self._focusManager.set_locus_of_focus(
 				event,
 				child,
 				snapshot=snapshotAccessibleObject(child),
 			)
-			return None
 		return super()._on_active_descendant_changed(event, resolveSnapshot=resolveSnapshot)
 
 	def _on_focused_changed(
@@ -812,12 +811,11 @@ class LinuxGtkScript(LinuxDefaultScript):
 			is not None
 		):
 			if bool(getattr(event, "detail1", 0)):
-				self._focusManager.set_locus_of_focus(
-					event,
-					event.eventSourceAccessible,
-					snapshot=snapshotAccessibleObject(event.eventSourceAccessible),
-				)
-				return None
+					return self._focusManager.set_locus_of_focus(
+						event,
+						event.eventSourceAccessible,
+						snapshot=snapshotAccessibleObject(event.eventSourceAccessible),
+					)
 			if self._focusManager.get_locus_of_focus() is event.eventSourceAccessible:
 				self._focusManager.set_locus_of_focus(
 					event,
