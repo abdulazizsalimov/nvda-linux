@@ -16,6 +16,7 @@ from typing import Any
 from linux.accessibility import (
 	AtspiFocusEventMonitor,
 	DesktopSnapshot,
+	clearAccessibleCache,
 	describeObjectSnapshot,
 	describeAccessibleNameSources,
 	getAccessibleAttributeValue,
@@ -285,6 +286,11 @@ class LinuxPlatform(SystemPlatform):
 		if not pendingEvents:
 			return False
 		for event in pendingEvents:
+			if event.eventType.startswith("object:attributes-changed") and event.sourceAccessible is not None:
+				try:
+					clearAccessibleCache(event.sourceAccessible)
+				except Exception:
+					log.debug("Failed to refresh AT-SPI object after attributes-changed", exc_info=True)
 			if event.sourceObject is not None:
 				log.info(
 					"Linux AT-SPI %s: %s",
@@ -306,6 +312,8 @@ class LinuxPlatform(SystemPlatform):
 					event.debugNameSources,
 				)
 			if event.shouldAnnounce and event.sourceObject is not None:
+				if not self._shouldAnnounceEvent(event, focusEventMonitor):
+					continue
 				resolvedObject = event.sourceObject
 				if event.sourceObject.name is None and event.sourceAccessible is not None:
 					resolvedObject = self._lateResolveFocusedObject(
@@ -314,6 +322,14 @@ class LinuxPlatform(SystemPlatform):
 						glibMainContext=runtime.glibMainContext,
 						log=log,
 					) or resolvedObject
+				if event.nameOverride and event.nameOverride != resolvedObject.name:
+					log.info(
+						"Linux AT-SPI name-change override: role=%s name=%r app=%r",
+						resolvedObject.roleName,
+						event.nameOverride,
+						resolvedObject.applicationName,
+					)
+					resolvedObject = replaceObjectSnapshotName(resolvedObject, event.nameOverride)
 				announcement = buildFocusAnnouncement(resolvedObject)
 				if (
 					announcement
@@ -321,6 +337,20 @@ class LinuxPlatform(SystemPlatform):
 					and self._shouldSpeakAnnouncement(runtime, resolvedObject)
 				):
 					runtime.speaker.speak(announcement)
+		return True
+
+	def _shouldAnnounceEvent(
+		self,
+		event,
+		focusEventMonitor: AtspiFocusEventMonitor,
+	) -> bool:
+		if not event.shouldAnnounce:
+			return False
+		if event.eventType.startswith("object:property-change:accessible-name"):
+			return (
+				event.sourceAccessible is focusEventMonitor.latestFocusedAccessible
+				or bool(event.sourceObject and event.sourceObject.focused)
+			)
 		return True
 
 	def _shouldSpeakAnnouncement(

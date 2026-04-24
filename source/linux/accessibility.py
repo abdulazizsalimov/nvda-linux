@@ -53,6 +53,7 @@ class FocusEventSnapshot:
 	shouldAnnounce: bool
 	detail1: int
 	detail2: int
+	nameOverride: str | None
 	sourceName: str | None
 	sourceRole: str | None
 	hostApplicationName: str | None
@@ -96,6 +97,8 @@ class AtspiFocusEventMonitor:
 				"object:active-descendant-changed",
 				"object:selection-changed",
 				"object:state-changed:selected",
+				"object:property-change:accessible-name",
+				"object:attributes-changed",
 			)
 		registeredEvents: list[str] = []
 		for eventType in eventTypes:
@@ -331,6 +334,10 @@ def _clearAccessibleCache(accessible) -> bool:
 			continue
 		return True
 	return False
+
+
+def clearAccessibleCache(accessible) -> bool:
+	return _clearAccessibleCache(accessible)
 
 
 def _getAccessibleRoleEnum(accessible):
@@ -631,6 +638,12 @@ def _getAccessibleTextContent(accessible) -> str | None:
 			return _normalizeAccessibleName(getText(0, -1))
 		except Exception:
 			return None
+
+
+def _normalizeEventString(value) -> str | None:
+	if not isinstance(value, str):
+		return None
+	return _normalizeAccessibleName(value)
 
 
 def _isAccessibleLike(value) -> bool:
@@ -1211,6 +1224,7 @@ def snapshotFocusEvent(event) -> FocusEventSnapshot:
 	source = getattr(event, "source", None)
 	eventLabel = eventType or "event"
 	shouldAnnounce = False
+	nameOverride = None
 	target = source
 	if eventType.startswith("object:state-changed:focused"):
 		eventLabel = "focus-gained" if int(getattr(event, "detail1", 0) or 0) else "focus-lost"
@@ -1227,6 +1241,14 @@ def snapshotFocusEvent(event) -> FocusEventSnapshot:
 		eventLabel = "selected" if int(getattr(event, "detail1", 0) or 0) else "deselected"
 		target = source
 		shouldAnnounce = bool(int(getattr(event, "detail1", 0) or 0))
+	elif eventType.startswith("object:property-change:accessible-name"):
+		eventLabel = "name-changed"
+		nameOverride = _normalizeEventString(getattr(event, "any_data", None))
+		target = source
+		shouldAnnounce = bool(nameOverride)
+	elif eventType.startswith("object:attributes-changed"):
+		eventLabel = "attributes-changed"
+		target = source
 	source = target
 	try:
 		sourceObject = snapshotAccessibleObject(source) if source is not None else None
@@ -1248,6 +1270,7 @@ def snapshotFocusEvent(event) -> FocusEventSnapshot:
 		shouldAnnounce=shouldAnnounce,
 		detail1=int(getattr(event, "detail1", 0) or 0),
 		detail2=int(getattr(event, "detail2", 0) or 0),
+		nameOverride=nameOverride,
 		sourceName=_getAccessibleName(source),
 		sourceRole=_getAccessibleRole(source),
 		hostApplicationName=_getHostApplicationName(source),
