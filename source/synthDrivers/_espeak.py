@@ -3,17 +3,21 @@
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-import nvwave
 import threading
 import queue
 from ctypes import cdll, CFUNCTYPE, c_int, c_void_p, POINTER, sizeof, c_short
 from ctypes import *  # noqa: F403
+from ctypes.util import find_library
 import config
 import globalVars
 from logHandler import log
 import os
+import sys
 
-from speechXml import toXmlLang
+if os.name == "nt":
+	import nvwave
+else:
+	nvwave = None
 
 isSpeaking = False
 onIndexReached = None
@@ -86,6 +90,18 @@ EE_OK = 0
 
 # eSpeak initialization flags
 espeakINITIALIZE_DONT_EXIT = 0x8000
+
+_IS_LINUX = sys.platform.startswith("linux")
+_SYSTEM_ESPEAK_DATA_PATHS = (
+	"/usr/lib/x86_64-linux-gnu/espeak-ng-data",
+	"/usr/lib/espeak-ng-data",
+	"/usr/share/espeak-ng-data",
+	"/usr/share/espeak-data",
+)
+
+
+def toXmlLang(nvdaLang: str) -> str:
+	return nvdaLang.replace("_", "-")
 
 
 class espeak_EVENT_id(Union):  # noqa: F405
@@ -170,9 +186,16 @@ def callback(wav, numsamples, event):
 			elif e.type == espeakEVENT_LIST_TERMINATED:
 				break
 		if not wav:
-			player.idle()
-			onIndexReached(None)
+			if player is not None:
+				player.idle()
+			if onIndexReached is not None:
+				onIndexReached(None)
 			isSpeaking = False
+			return CALLBACK_CONTINUE_SYNTHESIS
+		if player is None:
+			for indexNum, _indexByte in indexes:
+				if onIndexReached is not None:
+					onIndexReached(indexNum)
 			return CALLBACK_CONTINUE_SYNTHESIS
 		prevByte = 0
 		length = numsamples * sizeof(c_short)
@@ -238,6 +261,21 @@ def _speak(text):
 	# eSpeak can only process compound emojis  when using a UTF8 encoding
 	text = text.encode("utf8", errors="ignore")
 	flags = espeakCHARS_UTF8 | espeakSSML | espeakPHONEMES
+	if _IS_LINUX:
+		try:
+			res = espeakDLL.espeak_Synth(text, 0, 0, 0, 0, flags, byref(uniqueID), 0)  # noqa: F405
+			if res != EE_OK:
+				log.debugWarning("Linux eSpeak NG synthesis failed with code %s", res)
+				return res
+			res = espeakDLL.espeak_Synchronize()
+			if res != EE_OK:
+				log.debugWarning("Linux eSpeak NG synchronization failed with code %s", res)
+			return res
+		finally:
+			shouldNotifyDone = isSpeaking
+			isSpeaking = False
+			if shouldNotifyDone and onIndexReached is not None:
+				onIndexReached(None)
 	return espeakDLL.espeak_Synth(text, 0, 0, 0, 0, flags, byref(uniqueID), 0)  # noqa: F405
 
 
@@ -263,12 +301,21 @@ def stop():
 	for item in params:
 		bgQueue.put(item)
 	isSpeaking = False
-	player.stop()
+	if espeakDLL is not None:
+		try:
+			espeakDLL.espeak_ng_Cancel()
+		except Exception:
+			log.debug("Error cancelling eSpeak NG", exc_info=True)
+	if player is not None:
+		player.stop()
 
 
 def pause(switch):
 	global player
-	player.pause(switch)
+	if player is not None:
+		player.pause(switch)
+	elif switch:
+		stop()
 
 
 def setParameter(param, value, relative):
@@ -357,21 +404,35 @@ def initialize(indexCallback=None):
 		the number of the index or C{None} when speech stops.
 	"""
 	global espeakDLL, bgThread, bgQueue, player, onIndexReached
-	espeakDLL = cdll.LoadLibrary(os.path.join(globalVars.appDir, "synthDrivers", "espeak.dll"))
+	if _IS_LINUX:
+		libraryName = find_library("espeak-ng") or find_library("espeak")
+		if not libraryName:
+			raise OSError("Unable to locate libespeak-ng")
+		espeakDLL = cdll.LoadLibrary(libraryName)
+	else:
+		espeakDLL = cdll.LoadLibrary(os.path.join(globalVars.appDir, "synthDrivers", "espeak.dll"))
 	espeakDLL.espeak_Info.restype = c_char_p  # noqa: F405
-	espeakDLL.espeak_Synth.errcheck = espeak_errcheck
+	if not _IS_LINUX:
+		espeakDLL.espeak_Synth.errcheck = espeak_errcheck
 	espeakDLL.espeak_SetVoiceByName.errcheck = espeak_errcheck
 	espeakDLL.espeak_SetVoiceByProperties.errcheck = espeak_errcheck
 	espeakDLL.espeak_SetParameter.errcheck = espeak_errcheck
 	espeakDLL.espeak_Terminate.errcheck = espeak_errcheck
+	if not _IS_LINUX and hasattr(espeakDLL, "espeak_Synchronize"):
+		espeakDLL.espeak_Synchronize.errcheck = espeak_errcheck
 	espeakDLL.espeak_ListVoices.restype = POINTER(POINTER(espeak_VOICE))
 	espeakDLL.espeak_GetCurrentVoice.restype = POINTER(espeak_VOICE)
 	espeakDLL.espeak_SetVoiceByName.argtypes = (c_char_p,)  # noqa: F405
-	eSpeakPath = os.path.join(globalVars.appDir, "synthDrivers")
+	if _IS_LINUX:
+		eSpeakPath = next((path for path in _SYSTEM_ESPEAK_DATA_PATHS if os.path.isdir(path)), None)
+		outputMode = AUDIO_OUTPUT_PLAYBACK
+	else:
+		eSpeakPath = os.path.join(globalVars.appDir, "synthDrivers")
+		outputMode = AUDIO_OUTPUT_SYNCHRONOUS
 	sampleRate = espeakDLL.espeak_Initialize(
-		AUDIO_OUTPUT_SYNCHRONOUS,
+		outputMode,
 		300,
-		os.fsencode(eSpeakPath),
+		os.fsencode(eSpeakPath) if eSpeakPath else None,
 		# #10607: ensure espeak does not exit NVDA's process on errors such as the espeak path being invalid.
 		espeakINITIALIZE_DONT_EXIT,
 	)
@@ -379,14 +440,18 @@ def initialize(indexCallback=None):
 		raise OSError(
 			f"espeak_Initialize failed with code {sampleRate}. Given Espeak data path of {eSpeakPath}",
 		)
-	player = nvwave.WavePlayer(
-		channels=1,
-		samplesPerSec=sampleRate,
-		bitsPerSample=16,
-		outputDevice=config.conf["audio"]["outputDevice"],
-	)
+	if _IS_LINUX:
+		player = None
+	else:
+		player = nvwave.WavePlayer(
+			channels=1,
+			samplesPerSec=sampleRate,
+			bitsPerSample=16,
+			outputDevice=config.conf["audio"]["outputDevice"],
+		)
 	onIndexReached = indexCallback
-	espeakDLL.espeak_SetSynthCallback(callback)
+	if not _IS_LINUX:
+		espeakDLL.espeak_SetSynthCallback(callback)
 	bgQueue = queue.Queue()
 	bgThread = BgThread()
 	bgThread.start()
@@ -400,7 +465,8 @@ def terminate():
 	espeakDLL.espeak_Terminate()
 	bgThread = None
 	bgQueue = None
-	player.close()
+	if player is not None:
+		player.close()
 	player = None
 	espeakDLL = None
 	onIndexReached = None
@@ -412,7 +478,19 @@ def info():
 
 
 def getVariantDict():
-	dir = os.path.join(globalVars.appDir, "synthDrivers", "espeak-ng-data", "voices", "!v")
+	if _IS_LINUX:
+		dir = next(
+			(
+				os.path.join(baseDir, "voices", "!v")
+				for baseDir in _SYSTEM_ESPEAK_DATA_PATHS
+				if os.path.isdir(os.path.join(baseDir, "voices", "!v"))
+			),
+			None,
+		)
+		if dir is None:
+			return {"none": pgettext("espeakVarient", "none")}
+	else:
+		dir = os.path.join(globalVars.appDir, "synthDrivers", "espeak-ng-data", "voices", "!v")
 	# Translators: name of the default espeak varient.
 	variantDict = {"none": pgettext("espeakVarient", "none")}
 	for fileName in os.listdir(dir):

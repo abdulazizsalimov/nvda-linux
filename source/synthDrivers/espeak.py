@@ -5,6 +5,9 @@
 
 import os
 from collections import OrderedDict
+import importlib.util
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import _espeak
 from languageHandler import (
@@ -14,18 +17,47 @@ from languageHandler import (
 from synthDriverHandler import SynthDriver, VoiceInfo, synthIndexReached, synthDoneSpeaking
 from logHandler import log
 
-from speech.types import SpeechSequence
-from speech.commands import (
-	IndexCommand,
-	CharacterModeCommand,
-	LangChangeCommand,
-	BreakCommand,
-	PitchCommand,
-	RateCommand,
-	VolumeCommand,
-	PhonemeCommand,
-)
-from speechXml import toXmlLang
+if TYPE_CHECKING:
+	from speech.types import SpeechSequence
+else:
+	SpeechSequence = list
+
+
+def _loadSpeechSupportModule(fileName: str, moduleName: str):
+	modulePath = Path(__file__).resolve().parent.parent / "speech" / fileName
+	spec = importlib.util.spec_from_file_location(moduleName, modulePath)
+	if spec is None or spec.loader is None:
+		raise ImportError(f"Unable to create module spec for {modulePath}")
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module
+
+
+try:
+	from speech.commands import (
+		IndexCommand,
+		CharacterModeCommand,
+		LangChangeCommand,
+		BreakCommand,
+		PitchCommand,
+		RateCommand,
+		VolumeCommand,
+		PhonemeCommand,
+	)
+except Exception:
+	_speechCommands = _loadSpeechSupportModule("commands.py", "nvdaLinuxSpeechCommands")
+	IndexCommand = _speechCommands.IndexCommand
+	CharacterModeCommand = _speechCommands.CharacterModeCommand
+	LangChangeCommand = _speechCommands.LangChangeCommand
+	BreakCommand = _speechCommands.BreakCommand
+	PitchCommand = _speechCommands.PitchCommand
+	RateCommand = _speechCommands.RateCommand
+	VolumeCommand = _speechCommands.VolumeCommand
+	PhonemeCommand = _speechCommands.PhonemeCommand
+
+
+def toXmlLang(nvdaLang: str) -> str:
+	return nvdaLang.replace("_", "-")
 
 
 class SynthDriver(SynthDriver):
@@ -453,7 +485,8 @@ class SynthDriver(SynthDriver):
 		if not curVoice:
 			return ""
 		# #5783: For backwards compatibility, voice identifies should always be lowercase
-		return _espeak.decodeEspeakString(curVoice.identifier).split("+")[0].lower()
+		identifier = _espeak.decodeEspeakString(curVoice.identifier).split("+")[0].lower()
+		return os.path.basename(identifier)
 
 	def _set_voice(self, identifier):
 		if not identifier:

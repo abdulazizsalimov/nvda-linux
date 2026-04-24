@@ -507,7 +507,7 @@ def getSynthInstance(name: str, asDefault: bool = False):
 if sys.platform == "win32":
 	defaultSynthPriorityList = ["oneCore", "espeak", "silence"]
 else:
-	defaultSynthPriorityList = ["linuxEspeakNg", "silence"]
+	defaultSynthPriorityList = ["espeak", "silence"]
 
 
 def setSynth(name: str | None, isFallback: bool = False, *, _leftToTry: list[str] | None = None) -> bool:
