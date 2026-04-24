@@ -29,7 +29,13 @@ from linux.gtkMenus import (
 	getExportedGtkMenuSnapshot,
 	matchExportedGtkMenuItem,
 )
-from linux.speech import EspeakSpeaker, buildAccessibleAnnouncement
+from linux.presentation import (
+	LinuxDefaultScript,
+	LinuxFocusManager,
+	LinuxPresentationManager,
+	LinuxSpeechGenerator,
+)
+from linux.speech import EspeakSpeaker
 from linux.atspi import probeAtspiSupport
 from .base import SystemPlatform
 
@@ -53,6 +59,10 @@ class LinuxCoreRuntime:
 	pollIntervalSeconds: float = 0.05
 	interrupted: bool = False
 	speaker: EspeakSpeaker | None = None
+	focusManager: LinuxFocusManager | None = None
+	speechGenerator: LinuxSpeechGenerator | None = None
+	presentationManager: LinuxPresentationManager | None = None
+	defaultScript: LinuxDefaultScript | None = None
 	lastAnnouncementKey: tuple[str, str | None] | None = None
 	lastAnnouncementTime: float = 0.0
 	lastPresentedSourceKey: int | None = None
@@ -204,6 +214,16 @@ class LinuxPlatform(SystemPlatform):
 			focusEventMonitor=focusEventMonitor,
 			glibMainContext=glibMainContext,
 		)
+		runtime.focusManager = LinuxFocusManager()
+		runtime.speechGenerator = LinuxSpeechGenerator()
+		runtime.presentationManager = LinuxPresentationManager(
+			focusManager=runtime.focusManager,
+			speechGenerator=runtime.speechGenerator,
+		)
+		runtime.defaultScript = LinuxDefaultScript(
+			focusManager=runtime.focusManager,
+			presentationManager=runtime.presentationManager,
+		)
 		try:
 			speaker = EspeakSpeaker(log=log)
 		except Exception:
@@ -313,55 +333,32 @@ class LinuxPlatform(SystemPlatform):
 					event.eventLabel,
 					event.debugNameSources,
 				)
-			if event.shouldAnnounce and event.sourceObject is not None:
-				if not self._shouldAnnounceEvent(event, focusEventMonitor):
-					continue
-				resolvedObject = event.sourceObject
-				if event.sourceObject.name is None and event.sourceAccessible is not None:
-					resolvedObject = self._lateResolveFocusedObject(
-						event=event,
+			presentationResult = None
+			if event.shouldAnnounce and runtime.defaultScript is not None:
+				presentationResult = runtime.defaultScript.handle_event(
+					event,
+					resolveSnapshot=lambda currentEvent: self._resolvePresentationSnapshot(
+						currentEvent,
 						focusEventMonitor=focusEventMonitor,
 						glibMainContext=runtime.glibMainContext,
 						log=log,
-					) or resolvedObject
-				if event.nameOverride and event.nameOverride != resolvedObject.name:
-					log.info(
-						"Linux AT-SPI name-change override: role=%s name=%r app=%r",
-						resolvedObject.roleName,
-						event.nameOverride,
-						resolvedObject.applicationName,
-					)
-					resolvedObject = replaceObjectSnapshotName(resolvedObject, event.nameOverride)
-				announcement = buildAccessibleAnnouncement(
-					event.sourceAccessible,
-					snapshot=resolvedObject,
-					nameOverride=event.nameOverride,
+					),
 				)
-				if (
-					announcement
-					and runtime.speaker is not None
-					and self._shouldSpeakAnnouncement(
-						runtime,
-						announcement,
-						resolvedObject,
-						event=event,
-					)
-				):
-					runtime.speaker.speak(announcement)
-		return True
-
-	def _shouldAnnounceEvent(
-		self,
-		event,
-		focusEventMonitor: AtspiFocusEventMonitor,
-	) -> bool:
-		if not event.shouldAnnounce:
-			return False
-		if event.eventType.startswith("object:property-change:accessible-name"):
-			return (
-				event.sourceAccessible is focusEventMonitor.latestFocusedAccessible
-				or bool(event.sourceObject and event.sourceObject.focused)
-			)
+			if (
+				presentationResult is not None
+				and runtime.speaker is not None
+				and presentationResult.snapshot is not None
+				and self._shouldSpeakAnnouncement(
+					runtime,
+					presentationResult.announcement,
+					presentationResult.snapshot,
+					event=event,
+				)
+			):
+				runtime.speaker.speak(
+					presentationResult.announcement,
+					interrupt=presentationResult.interrupt,
+				)
 		return True
 
 	def _shouldSpeakAnnouncement(
@@ -397,6 +394,34 @@ class LinuxPlatform(SystemPlatform):
 		runtime.lastAnnouncementKey = announcementKey
 		runtime.lastAnnouncementTime = now
 		return True
+
+	def _resolvePresentationSnapshot(
+		self,
+		event,
+		*,
+		focusEventMonitor: AtspiFocusEventMonitor,
+		glibMainContext: Any | None,
+		log: Any,
+	):
+		if event.sourceObject is None:
+			return None
+		resolvedObject = event.sourceObject
+		if event.sourceObject.name is None and event.sourceAccessible is not None:
+			resolvedObject = self._lateResolveFocusedObject(
+				event=event,
+				focusEventMonitor=focusEventMonitor,
+				glibMainContext=glibMainContext,
+				log=log,
+			) or resolvedObject
+		if event.nameOverride and event.nameOverride != resolvedObject.name:
+			log.info(
+				"Linux AT-SPI name-change override: role=%s name=%r app=%r",
+				resolvedObject.roleName,
+				event.nameOverride,
+				resolvedObject.applicationName,
+			)
+			resolvedObject = replaceObjectSnapshotName(resolvedObject, event.nameOverride)
+		return resolvedObject
 
 	def _lateResolveFocusedObject(
 		self,
