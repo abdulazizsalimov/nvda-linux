@@ -390,9 +390,12 @@ def _normalizeStates(stateSet, role):
 				states.add(State.INDETERMINATE)
 		if stateSet.contains(Atspi.StateType.SELECTABLE_TEXT):
 			states.add(State.SELECTABLE)
+		# GTK / AT-SPI often omits one of ENABLED/SENSITIVE for perfectly usable controls.
+		# Treat controls as unavailable only when both are absent to avoid false positives
+		# like "Home unavailable folder" in Files.
 		if _shouldExposeUnavailableState(stateSet) and (
 			not stateSet.contains(Atspi.StateType.ENABLED)
-			or not stateSet.contains(Atspi.StateType.SENSITIVE)
+			and not stateSet.contains(Atspi.StateType.SENSITIVE)
 		):
 			states.add(State.UNAVAILABLE)
 		if _shouldExposeVisibilityState(stateSet):
