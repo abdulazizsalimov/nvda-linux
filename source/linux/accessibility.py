@@ -739,6 +739,7 @@ def _normalizePresentationAccessible(accessible):
 		return None
 	Atspi = importAtspi()
 	presentationalLeafRoles = {
+		Atspi.Role.ACCELERATOR_LABEL,
 		Atspi.Role.FILLER,
 		Atspi.Role.LABEL,
 		Atspi.Role.PANEL,

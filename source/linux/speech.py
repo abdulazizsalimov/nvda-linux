@@ -163,6 +163,20 @@ def _stringsAreRedundant(first: str | None, second: str | None) -> bool:
 	return firstKey == secondKey
 
 
+def _appendUtterancePart(parts: list[str], part: str | None) -> None:
+	part = _sanitizeUtterance(part or "")
+	if not part:
+		return
+	if any(_stringsAreRedundant(existingPart, part) for existingPart in parts):
+		return
+	parts.append(part)
+
+
+def _extendUtteranceParts(parts: list[str], candidates: tuple[str, ...] | list[str]) -> None:
+	for candidate in candidates:
+		_appendUtterancePart(parts, candidate)
+
+
 def _getAccessibleAttributes(accessible) -> tuple[tuple[str, str], ...]:
 	if accessible is None:
 		return ()
@@ -338,6 +352,15 @@ def _isShortcutLike(text: str | None) -> bool:
 	)
 
 
+def _getSnapshotName(snapshot) -> str | None:
+	if snapshot is None:
+		return None
+	name = _sanitizeUtterance(getattr(snapshot, "name", None) or "") or None
+	if not name or _isLikelyContainerDescription(name):
+		return None
+	return name
+
+
 def _getPresentableDescendantNames(accessible, *, maxParts: int = 3) -> tuple[str, ...]:
 	Atspi = importAtspi()
 	skipRoles = {
@@ -403,7 +426,9 @@ def _shouldUseDescendantNameTraversal(roleEnum, childCount: int) -> bool:
 def _getAccessibleLabelAndName(
 	accessible,
 	*,
+	snapshot=None,
 	nameOverride: str | None = None,
+	allowDescendantTraversal: bool = False,
 ) -> tuple[str, ...]:
 	roleEnum = _getAccessibleRoleEnum(accessible)
 	childCount = _getAccessibleChildCount(accessible)
@@ -413,6 +438,12 @@ def _getAccessibleLabelAndName(
 		name = _getAccessibleTextContent(accessible)
 	if not name:
 		name = next(iter(_iterAccessibleAttributeCandidates(accessible)), None)
+	if not name:
+		description = _getAccessibleDescription(accessible)
+		if description and not _isLikelyContainerDescription(description):
+			name = description
+	if not name:
+		name = _getSnapshotName(snapshot)
 	if label and name and _stringsAreRedundant(label, name):
 		return (label,)
 	if label and name:
@@ -421,11 +452,10 @@ def _getAccessibleLabelAndName(
 		return (label,)
 	if name:
 		return (name,)
-	if _shouldUseDescendantNameTraversal(roleEnum, childCount):
+	if allowDescendantTraversal and _shouldUseDescendantNameTraversal(roleEnum, childCount):
 		descendantNames = _getPresentableDescendantNames(accessible)
 		if descendantNames:
 			return descendantNames
-	description = _getAccessibleDescription(accessible)
 	menuRoles = {
 		importAtspi().Role.CHECK_MENU_ITEM,
 		importAtspi().Role.MENU,
@@ -434,12 +464,43 @@ def _getAccessibleLabelAndName(
 		importAtspi().Role.RADIO_MENU_ITEM,
 	}
 	if (
-		description
-		and not _isLikelyContainerDescription(description)
+		name
+		and not _isLikelyContainerDescription(name)
 		and not (childCount > 0 and roleEnum in menuRoles)
 	):
-		return (description,)
+		return (name,)
 	return ()
+
+
+def _getAccessibleStaticText(
+	accessible,
+	*,
+	snapshot=None,
+	exclude: tuple[str, ...] = (),
+	maxParts: int = 2,
+) -> tuple[str, ...]:
+	if accessible is None or maxParts <= 0:
+		return ()
+	parts: list[str] = []
+	description = _getAccessibleDescription(accessible)
+	if description and not _isLikelyContainerDescription(description):
+		if not any(_stringsAreRedundant(description, existingPart) for existingPart in (*exclude, *parts)):
+			parts.append(description)
+	if len(parts) >= maxParts:
+		return tuple(parts[:maxParts])
+	for candidate in _getPresentableDescendantNames(accessible, maxParts=maxParts + len(exclude)):
+		if any(_stringsAreRedundant(candidate, existingPart) for existingPart in (*exclude, *parts)):
+			continue
+		parts.append(candidate)
+		if len(parts) >= maxParts:
+			break
+	if not parts:
+		snapshotName = _getSnapshotName(snapshot)
+		if snapshotName and not any(
+			_stringsAreRedundant(snapshotName, existingPart) for existingPart in exclude
+		):
+			parts.append(snapshotName)
+	return tuple(parts[:maxParts])
 
 
 def _getAcceleratorLabelForSequence(sequence: str) -> str:
@@ -534,6 +595,27 @@ def _shouldAlwaysSpeakRole(snapshot) -> bool:
 	}
 
 
+def _shouldSpeakRole(accessible, snapshot) -> bool:
+	import controlTypes
+
+	roleEnum = _getAccessibleRoleEnum(accessible)
+	if roleEnum is not None:
+		Atspi = importAtspi()
+		if roleEnum in {
+			Atspi.Role.FILLER,
+			Atspi.Role.LABEL,
+			Atspi.Role.MENU_ITEM,
+			Atspi.Role.PARAGRAPH,
+			Atspi.Role.REDUNDANT_OBJECT,
+			Atspi.Role.SECTION,
+			Atspi.Role.STATIC,
+			Atspi.Role.TABLE_CELL,
+			Atspi.Role.UNKNOWN,
+		}:
+			return False
+	return snapshot.role not in controlTypes.silentRolesOnFocus
+
+
 def _getStateLabels(snapshot) -> list[str]:
 	import controlTypes
 
@@ -553,27 +635,57 @@ def _getStateLabels(snapshot) -> list[str]:
 		]
 
 
-def buildAccessibleAnnouncement(
-	accessible,
+def _getFilteredStateLabels(
+	snapshot,
 	*,
-	snapshot=None,
-	nameOverride: str | None = None,
-) -> str:
+	allowedStateNames: set[str] | None = None,
+	excludedStateNames: set[str] | None = None,
+) -> list[str]:
 	import controlTypes
 
-	if accessible is None and snapshot is None:
-		return ""
-	if snapshot is None and accessible is not None:
-		try:
-			snapshot = snapshotAccessibleObject(accessible)
-		except Exception:
-			snapshot = None
-	if snapshot is None:
-		return ""
-	labelAndName = _getAccessibleLabelAndName(accessible, nameOverride=nameOverride)
-	name = labelAndName[0] if labelAndName else None
-	mnemonic, accelerator = _getAccessibleKeyboardInfo(accessible)
+	filteredStates = set(snapshot.states)
+	if allowedStateNames is not None:
+		filteredStates = {
+			state
+			for state in filteredStates
+			if state.name in allowedStateNames
+		}
+	if excludedStateNames:
+		filteredStates = {
+			state
+			for state in filteredStates
+			if state.name not in excludedStateNames
+		}
+	try:
+		return list(
+			controlTypes.processAndLabelStates(
+				snapshot.role,
+				filteredStates,
+				controlTypes.OutputReason.FOCUS,
+			)
+		)
+	except Exception:
+		return [
+			state.displayString
+			for state in sorted(filteredStates, key=lambda state: state.value)
+			if state.name not in {"FOCUSED", "FOCUSABLE"}
+		]
+
+
+def _buildDefaultAnnouncementParts(
+	accessible,
+	*,
+	snapshot,
+	nameOverride: str | None = None,
+) -> list[str]:
 	import controlTypes
+
+	labelAndName = _getAccessibleLabelAndName(
+		accessible,
+		snapshot=snapshot,
+		nameOverride=nameOverride,
+	)
+	mnemonic, accelerator = _getAccessibleKeyboardInfo(accessible)
 	if (
 		not labelAndName
 		and snapshot.role in {
@@ -585,19 +697,189 @@ def buildAccessibleAnnouncement(
 		and not mnemonic
 		and not accelerator
 	):
+		return []
+	parts: list[str] = []
+	_extendUtteranceParts(parts, list(labelAndName))
+	if _shouldAlwaysSpeakRole(snapshot) or _shouldSpeakRole(accessible, snapshot) or not labelAndName:
+		_appendUtterancePart(parts, snapshot.role.displayString)
+	_extendUtteranceParts(parts, _getStateLabels(snapshot))
+	_appendUtterancePart(parts, mnemonic)
+	_appendUtterancePart(parts, accelerator)
+	if not parts:
+		_appendUtterancePart(parts, snapshot.applicationName)
+	elif not labelAndName:
+		_appendUtterancePart(parts, snapshot.applicationName)
+	return parts
+
+
+def _buildMenuItemAnnouncementParts(
+	accessible,
+	*,
+	snapshot,
+	nameOverride: str | None = None,
+) -> list[str]:
+	labelAndName = _getAccessibleLabelAndName(
+		accessible,
+		snapshot=snapshot,
+		nameOverride=nameOverride,
+		allowDescendantTraversal=True,
+	)
+	parts: list[str] = []
+	_extendUtteranceParts(parts, list(labelAndName))
+	if not parts:
+		_extendUtteranceParts(
+			parts,
+			list(_getAccessibleStaticText(accessible, snapshot=snapshot, maxParts=1)),
+		)
+	_extendUtteranceParts(
+		parts,
+		_getFilteredStateLabels(
+			snapshot,
+			allowedStateNames={
+				"CHECKED",
+				"HALFCHECKED",
+				"PRESSED",
+				"EXPANDED",
+				"COLLAPSED",
+				"UNAVAILABLE",
+			},
+		),
+	)
+	mnemonic, accelerator = _getAccessibleKeyboardInfo(accessible)
+	_appendUtterancePart(parts, mnemonic)
+	_appendUtterancePart(parts, accelerator)
+	if not parts:
+		_appendUtterancePart(parts, snapshot.role.displayString)
+	return parts
+
+
+def _buildLabelAnnouncementParts(
+	accessible,
+	*,
+	snapshot,
+	nameOverride: str | None = None,
+) -> list[str]:
+	labelAndName = _getAccessibleLabelAndName(
+		accessible,
+		snapshot=snapshot,
+		nameOverride=nameOverride,
+	)
+	parts: list[str] = []
+	_extendUtteranceParts(parts, list(labelAndName))
+	if not parts:
+		_extendUtteranceParts(
+			parts,
+			list(_getAccessibleStaticText(accessible, snapshot=snapshot, maxParts=1)),
+		)
+	return parts
+
+
+def _buildPanelAnnouncementParts(
+	accessible,
+	*,
+	snapshot,
+	nameOverride: str | None = None,
+) -> list[str]:
+	textContent = _getAccessibleTextContent(accessible)
+	parts: list[str] = []
+	_appendUtterancePart(parts, textContent)
+	if not parts:
+		_extendUtteranceParts(
+			parts,
+			list(
+				_getAccessibleLabelAndName(
+					accessible,
+					snapshot=snapshot,
+					nameOverride=nameOverride,
+				),
+			),
+		)
+	_extendUtteranceParts(
+		parts,
+		list(
+			_getAccessibleStaticText(
+				accessible,
+				snapshot=snapshot,
+				exclude=tuple(parts),
+			),
+		),
+	)
+	if parts and _shouldSpeakRole(accessible, snapshot):
+		_appendUtterancePart(parts, snapshot.role.displayString)
+	return parts
+
+
+def _buildRoleSpecificAnnouncementParts(
+	accessible,
+	*,
+	snapshot,
+	nameOverride: str | None = None,
+) -> list[str]:
+	roleEnum = _getAccessibleRoleEnum(accessible)
+	if roleEnum is None:
+		return _buildDefaultAnnouncementParts(
+			accessible,
+			snapshot=snapshot,
+			nameOverride=nameOverride,
+		)
+	Atspi = importAtspi()
+	if roleEnum in {
+		Atspi.Role.CHECK_MENU_ITEM,
+		Atspi.Role.MENU_ITEM,
+		Atspi.Role.RADIO_MENU_ITEM,
+		Atspi.Role.TEAROFF_MENU_ITEM,
+	}:
+		return _buildMenuItemAnnouncementParts(
+			accessible,
+			snapshot=snapshot,
+			nameOverride=nameOverride,
+		)
+	if roleEnum == Atspi.Role.LABEL:
+		return _buildLabelAnnouncementParts(
+			accessible,
+			snapshot=snapshot,
+			nameOverride=nameOverride,
+		)
+	if roleEnum in {
+		Atspi.Role.FILLER,
+		Atspi.Role.PANEL,
+		Atspi.Role.STATIC,
+		Atspi.Role.TEXT,
+	}:
+		return _buildPanelAnnouncementParts(
+			accessible,
+			snapshot=snapshot,
+			nameOverride=nameOverride,
+		)
+	return _buildDefaultAnnouncementParts(
+		accessible,
+		snapshot=snapshot,
+		nameOverride=nameOverride,
+	)
+
+
+def buildAccessibleAnnouncement(
+	accessible,
+	*,
+	snapshot=None,
+	nameOverride: str | None = None,
+) -> str:
+	if accessible is None and snapshot is None:
 		return ""
-	parts: list[str] = list(labelAndName)
-	if _shouldAlwaysSpeakRole(snapshot) or snapshot.role not in controlTypes.silentRolesOnFocus or not name:
-		parts.append(snapshot.role.displayString)
-	parts.extend(_getStateLabels(snapshot))
-	if mnemonic and mnemonic not in parts:
-		parts.append(mnemonic)
-	if accelerator and accelerator not in parts:
-		parts.append(accelerator)
+	if snapshot is None and accessible is not None:
+		try:
+			snapshot = snapshotAccessibleObject(accessible)
+		except Exception:
+			snapshot = None
+	if snapshot is None:
+		return ""
+	parts = _buildRoleSpecificAnnouncementParts(
+		accessible,
+		snapshot=snapshot,
+		nameOverride=nameOverride,
+	)
 	if not parts and snapshot.applicationName:
-		parts.append(snapshot.applicationName)
-	elif not name and snapshot.applicationName and snapshot.applicationName not in parts:
-		parts.append(snapshot.applicationName)
+		parts = [snapshot.applicationName]
 	return _sanitizeUtterance(" ".join(part for part in parts if part))
 
 
