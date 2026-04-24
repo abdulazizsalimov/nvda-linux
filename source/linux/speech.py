@@ -46,6 +46,13 @@ def _sanitizeUtterance(text: str) -> str:
 def _callAccessibleStringMethod(accessible, methodName: str) -> str | None:
 	if accessible is None:
 		return None
+	Atspi = importAtspi()
+	staticMethod = getattr(Atspi.Accessible, methodName, None)
+	if callable(staticMethod):
+		try:
+			return _sanitizeUtterance(staticMethod(accessible) or "") or None
+		except Exception:
+			pass
 	method = getattr(accessible, methodName, None)
 	if not callable(method):
 		return None
@@ -68,13 +75,21 @@ def _getAccessibleDescription(accessible) -> str | None:
 def _getAccessibleTextContent(accessible) -> str | None:
 	if accessible is None:
 		return None
+	Atspi = importAtspi()
 	textIface = None
-	getTextIface = getattr(accessible, "get_text_iface", None)
+	getTextIface = getattr(Atspi.Accessible, "get_text_iface", None)
 	if callable(getTextIface):
 		try:
-			textIface = getTextIface()
+			textIface = getTextIface(accessible)
 		except Exception:
 			textIface = None
+	if textIface is None:
+		getTextIface = getattr(accessible, "get_text_iface", None)
+		if callable(getTextIface):
+			try:
+				textIface = getTextIface()
+			except Exception:
+				textIface = None
 	if textIface is None:
 		isText = getattr(accessible, "is_text", None)
 		try:
@@ -84,6 +99,22 @@ def _getAccessibleTextContent(accessible) -> str | None:
 			textIface = None
 	if textIface is None:
 		return None
+	getCharacterCount = getattr(Atspi.Text, "get_character_count", None)
+	getText = getattr(Atspi.Text, "get_text", None)
+	if callable(getCharacterCount) and callable(getText):
+		try:
+			characterCount = int(getCharacterCount(textIface) or 0)
+		except Exception:
+			characterCount = 0
+		if characterCount <= 0:
+			return None
+		try:
+			return _sanitizeUtterance(getText(textIface, 0, characterCount) or "") or None
+		except Exception:
+			try:
+				return _sanitizeUtterance(getText(textIface, 0, -1) or "") or None
+			except Exception:
+				return None
 	getCharacterCount = getattr(textIface, "get_character_count", None)
 	getText = getattr(textIface, "get_text", None)
 	if not callable(getCharacterCount) or not callable(getText):
@@ -106,6 +137,13 @@ def _getAccessibleTextContent(accessible) -> str | None:
 def _getAccessibleRoleEnum(accessible):
 	if accessible is None:
 		return None
+	Atspi = importAtspi()
+	getRole = getattr(Atspi.Accessible, "get_role", None)
+	if callable(getRole):
+		try:
+			return getRole(accessible)
+		except Exception:
+			pass
 	try:
 		return accessible.get_role()
 	except Exception:
@@ -115,6 +153,13 @@ def _getAccessibleRoleEnum(accessible):
 def _getAccessibleChild(accessible, index: int):
 	if accessible is None:
 		return None
+	Atspi = importAtspi()
+	getChildAtIndex = getattr(Atspi.Accessible, "get_child_at_index", None)
+	if callable(getChildAtIndex):
+		try:
+			return getChildAtIndex(accessible, index)
+		except Exception:
+			pass
 	try:
 		return accessible.get_child_at_index(index)
 	except Exception:
@@ -124,6 +169,13 @@ def _getAccessibleChild(accessible, index: int):
 def _getAccessibleChildCount(accessible) -> int:
 	if accessible is None:
 		return 0
+	Atspi = importAtspi()
+	getChildCount = getattr(Atspi.Accessible, "get_child_count", None)
+	if callable(getChildCount):
+		try:
+			return int(getChildCount(accessible) or 0)
+		except Exception:
+			pass
 	try:
 		return int(accessible.get_child_count() or 0)
 	except Exception:
@@ -348,28 +400,36 @@ def _getPresentableDescendantNames(accessible, *, maxParts: int = 3) -> tuple[st
 		Atspi.Role.TABLE_ROW,
 		Atspi.Role.TABLE_COLUMN_HEADER,
 		Atspi.Role.TABLE_ROW_HEADER,
-		Atspi.Role.STATIC,
 		Atspi.Role.LINK,
 		Atspi.Role.IMAGE,
 		Atspi.Role.SEPARATOR,
 	}
-	candidates: list[str] = []
+	primaryRoles = {
+		Atspi.Role.LABEL,
+		Atspi.Role.STATIC,
+		Atspi.Role.TEXT,
+	}
+	primaryCandidates: list[str] = []
+	fallbackCandidates: list[str] = []
 	for descendant in _iterAccessibleDescendants(accessible):
-		if _getAccessibleRoleEnum(descendant) in skipRoles:
+		descendantRole = _getAccessibleRoleEnum(descendant)
+		if descendantRole in skipRoles:
 			continue
 		candidate = (
-			_getAccessibleSelfName(descendant)
-			or _getAccessibleTextContent(descendant)
+			_getAccessibleTextContent(descendant)
+			or _getAccessibleSelfName(descendant)
 			or next(iter(_iterAccessibleAttributeCandidates(descendant)), None)
 		)
 		if not candidate or _isShortcutLike(candidate):
 			continue
-		if any(_stringsAreRedundant(existingCandidate, candidate) for existingCandidate in candidates):
+		targetCandidates = primaryCandidates if descendantRole in primaryRoles else fallbackCandidates
+		allCandidates = (*primaryCandidates, *fallbackCandidates)
+		if any(_stringsAreRedundant(existingCandidate, candidate) for existingCandidate in allCandidates):
 			continue
-		candidates.append(candidate)
-		if len(candidates) >= maxParts:
+		targetCandidates.append(candidate)
+		if len(primaryCandidates) + len(fallbackCandidates) >= maxParts:
 			break
-	return tuple(candidates)
+	return tuple((*primaryCandidates, *fallbackCandidates)[:maxParts])
 
 
 def _getAccessibleLabelAndName(
@@ -543,11 +603,24 @@ def buildAccessibleAnnouncement(
 		return ""
 	labelAndName = _getAccessibleLabelAndName(accessible, nameOverride=nameOverride)
 	name = labelAndName[0] if labelAndName else None
+	mnemonic, accelerator = _getAccessibleKeyboardInfo(accessible)
+	import controlTypes
+	if (
+		not labelAndName
+		and snapshot.role in {
+			controlTypes.Role.FILLER,
+			controlTypes.Role.LABEL,
+			controlTypes.Role.PANEL,
+			controlTypes.Role.STATICTEXT,
+		}
+		and not mnemonic
+		and not accelerator
+	):
+		return ""
 	parts: list[str] = list(labelAndName)
 	if _shouldAlwaysSpeakRole(snapshot) or snapshot.role not in controlTypes.silentRolesOnFocus or not name:
 		parts.append(snapshot.role.displayString)
 	parts.extend(_getStateLabels(snapshot))
-	mnemonic, accelerator = _getAccessibleKeyboardInfo(accessible)
 	if mnemonic and mnemonic not in parts:
 		parts.append(mnemonic)
 	if accelerator and accelerator not in parts:

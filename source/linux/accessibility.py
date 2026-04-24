@@ -399,6 +399,15 @@ def _getAccessibleChild(accessible, index: int):
 		return None
 
 
+def _getAccessibleParent(accessible):
+	if accessible is None:
+		return None
+	try:
+		return accessible.get_parent()
+	except Exception:
+		return None
+
+
 def _iterAccessibleDescendants(
 	accessible,
 	*,
@@ -723,6 +732,45 @@ def _getActiveDescendantAccessible(event):
 	if _isAccessibleLike(anyData):
 		return anyData
 	return None
+
+
+def _normalizePresentationAccessible(accessible):
+	if accessible is None:
+		return None
+	Atspi = importAtspi()
+	presentationalLeafRoles = {
+		Atspi.Role.FILLER,
+		Atspi.Role.LABEL,
+		Atspi.Role.PANEL,
+		Atspi.Role.STATIC,
+		Atspi.Role.TEXT,
+	}
+	interactiveAncestorRoles = {
+		Atspi.Role.CHECK_MENU_ITEM,
+		Atspi.Role.LIST_ITEM,
+		Atspi.Role.MENU,
+		Atspi.Role.MENU_ITEM,
+		Atspi.Role.PAGE_TAB,
+		Atspi.Role.POPUP_MENU,
+		Atspi.Role.PUSH_BUTTON,
+		Atspi.Role.PUSH_BUTTON_MENU,
+		Atspi.Role.RADIO_MENU_ITEM,
+		Atspi.Role.TEAROFF_MENU_ITEM,
+		Atspi.Role.TOGGLE_BUTTON,
+		Atspi.Role.TREE_ITEM,
+	}
+	roleEnum = _getAccessibleRoleEnum(accessible)
+	if roleEnum not in presentationalLeafRoles:
+		return accessible
+	parent = _getAccessibleParent(accessible)
+	depth = 0
+	while parent is not None and depth < 4:
+		parentRole = _getAccessibleRoleEnum(parent)
+		if parentRole in interactiveAncestorRoles:
+			return parent
+		parent = _getAccessibleParent(parent)
+		depth += 1
+	return accessible
 
 
 def _iterRelationTargets(accessible, relationTypes: set[object], *, maxTargets: int = 8):
@@ -1249,7 +1297,7 @@ def snapshotFocusEvent(event) -> FocusEventSnapshot:
 	elif eventType.startswith("object:attributes-changed"):
 		eventLabel = "attributes-changed"
 		target = source
-	source = target
+	source = _normalizePresentationAccessible(target)
 	try:
 		sourceObject = snapshotAccessibleObject(source) if source is not None else None
 	except Exception:
